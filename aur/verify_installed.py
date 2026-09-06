@@ -21,7 +21,7 @@ parser.add_argument('output', type=Path)
 args = parser.parse_args()
 audit = json.loads(args.audit.read_text())
 assert all(item['architecture'] == 'x86_64' for item in audit['elf'].values())
-result = {'mode': args.mode, 'payloadFiles': len(audit['files']), 'applicationLaunched': False, 'sourceRebuilt': False, 'checks': []}
+result = {'status': 'IN_PROGRESS', 'mode': args.mode, 'payloadFiles': len(audit['files']), 'applicationLaunched': False, 'sourceRebuilt': False, 'checks': []}
 extra = ['/usr/bin/hidden-tunes-desktop', '/usr/share/licenses/hiddentunes/EULA.md', '/usr/share/licenses/hiddentunes/LICENSE.electron.txt', '/usr/share/licenses/hiddentunes/LICENSES.chromium.html']
 if args.mode == 'uninstalled':
     for name in list(audit['files']) + [p.removeprefix('/') for p in extra]:
@@ -54,13 +54,22 @@ else:
         # lddtree parses ELF metadata; it does not invoke the application.
         tree = subprocess.run(['lddtree', path], text=True, capture_output=True)
         result['elfDependencyTrees'][name] = tree.stdout + tree.stderr
+        args.output.write_text(json.dumps(result, indent=2) + '\n')
         assert tree.returncode == 0, f'lddtree failed: {name}'
-        assert '=> None' not in tree.stdout and 'not found' not in tree.stdout.lower(), f'unresolved ELF dependency: {name}'
+        # Shared libraries have no PT_INTERP segment. lddtree legitimately prints
+        # an interpreter => None header for them; unresolved DT_NEEDED entries
+        # are separate lines and must still fail. Match only this exact header.
+        dependency_lines = tree.stdout.splitlines()
+        if audit['elf'][name]['interpreter'] is None:
+            dependency_lines = [line for line in dependency_lines if line != f'{path} (interpreter => None)']
+        dependency_text = '\n'.join(dependency_lines)
+        assert '=> None' not in dependency_text and 'not found' not in dependency_text.lower(), f'unresolved ELF dependency: {name}'
         libs = subprocess.run(['lddtree', '-l', path], check=True, text=True, capture_output=True)
         for lib in libs.stdout.splitlines():
             if lib.startswith('/usr/lib/') and lib not in result['libraryOwners']:
                 owner = subprocess.run(['pacman', '-Qo', lib], check=True, text=True, capture_output=True)
                 result['libraryOwners'][lib] = owner.stdout.strip()
     result['checks'].append('all eight ELF files resolve dependencies using installed Arch packages')
+result['status'] = 'PASS'
 args.output.write_text(json.dumps(result, indent=2) + '\n')
 print(json.dumps({'mode': args.mode, 'checks': result['checks'], 'applicationLaunched': False}, indent=2))

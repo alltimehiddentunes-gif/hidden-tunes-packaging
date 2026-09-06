@@ -21,6 +21,7 @@ def elf_metadata(data):
     phoff = struct.unpack_from('<Q', data, 32)[0]
     phentsize, phnum = struct.unpack_from('<HH', data, 54)
     segments = [struct.unpack_from('<IIQQQQQQ', data, phoff + i * phentsize) for i in range(phnum)]
+    interpreter = next((data[offset:offset + filesz].rstrip(b'\0').decode('ascii') for kind, flags, offset, vaddr, paddr, filesz, memsz, align in segments if kind == 3), None)
     tags = []
     for kind, flags, offset, vaddr, paddr, filesz, memsz, align in segments:
         if kind == 2:
@@ -37,7 +38,7 @@ def elf_metadata(data):
             if tag == 1:
                 end = data.index(b'\0', base + value)
                 needed.append(data[base + value:end].decode('ascii'))
-    return {'class': 64, 'machine': machine, 'architecture': 'x86_64' if machine == 62 else str(machine), 'needed': needed, 'glibcVersions': sorted(set(v.decode() for v in re.findall(rb'GLIBC_[0-9]+\.[0-9]+(?:\.[0-9]+)?', data)))}
+    return {'class': 64, 'machine': machine, 'architecture': 'x86_64' if machine == 62 else str(machine), 'interpreter': interpreter, 'needed': needed, 'glibcVersions': sorted(set(v.decode() for v in re.findall(rb'GLIBC_[0-9]+\.[0-9]+(?:\.[0-9]+)?', data)))}
 
 def audit(path):
     data = path.read_bytes()
