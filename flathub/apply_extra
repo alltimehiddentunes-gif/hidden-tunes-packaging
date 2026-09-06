@@ -2,7 +2,8 @@
 set -euo pipefail
 # Flatpak calls this inside its extra-data sandbox. Never use it as a host installer.
 test "$(pwd -P)" = /app/extra || { echo 'Refusing extraction outside /app/extra' >&2; exit 1; }
-test -f /.flatpak-info || { echo 'Flatpak sandbox metadata missing' >&2; exit 1; }
+# Unlike a normal app launch, Flatpak's apply-extra sandbox does not provide
+# /.flatpak-info. The documented sandbox and fixed /app/extra path apply here.
 test ! -e hidden-tunes
 test ! -e data.tar.xz
 test "$(stat -c %s hidden-tunes-1.0.1-amd64.deb)" = 146881864
