@@ -12,6 +12,7 @@ work="$runner_temp/hiddentunes-flatpak-verification"
 [[ $(dirname "$work") == "$runner_temp" && ! -e $work ]] || { echo 'Temporary workspace is not a new direct runner child' >&2; exit 1; }
 mkdir "$work"
 export XDG_DATA_HOME="$work/data" XDG_CONFIG_HOME="$work/config" XDG_CACHE_HOME="$work/cache"
+export FLATPAK_USER_DIR="$XDG_DATA_HOME/flatpak"
 mkdir "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
 evidence="$GITHUB_WORKSPACE/ci-results/flathub"
 mkdir -p "$evidence"
@@ -44,7 +45,7 @@ flatpak --version | tee "$evidence/flatpak-version.log"
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak install --user -y flathub org.flatpak.Builder org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 org.electronjs.Electron2.BaseApp//25.08
 flatpak list --user --columns=ref,origin,active | tee "$evidence/tool-runtime-refs.log"
-flatpak remote-ls --user flathub --runtime --columns=ref | grep -E 'org.freedesktop.(Platform|Sdk)/x86_64/|org.electronjs.Electron2.BaseApp/x86_64/' | tee "$evidence/available-runtime-refs.log"
+flatpak remote-ls --user flathub --columns=ref | grep -E 'org.freedesktop.(Platform|Sdk)/x86_64/|org.electronjs.Electron2.BaseApp/x86_64/' | tee "$evidence/available-runtime-refs.log"
 
 # Validation really runs. Its result stays separate from package compatibility;
 # missing owner-approved metadata must never be reported as a Flathub PASS.
@@ -58,7 +59,9 @@ if [[ $metadata_exit == 0 ]]; then export HT_FLATPAK_METADATA_LINT=PASS; else ex
 if [[ $manifest_exit == 0 ]]; then export HT_FLATPAK_MANIFEST_LINT=PASS; else export HT_FLATPAK_MANIFEST_LINT="FAIL ($manifest_exit)"; fi
 
 desktop-file-validate "$candidate/com.hiddentunes.HiddenTunes.desktop"
-flatpak run org.flatpak.Builder --user --disable-rofiles-fuse --repo="$work/repo" "$work/build" "$candidate/com.hiddentunes.HiddenTunes.yml" 2>&1 | tee "$evidence/build.log"
+# Builder's own Flatpak redirects XDG_DATA_HOME. Pass this explicit, supported
+# user-installation override so it sees only this job's freshly installed SDK.
+flatpak run --env=FLATPAK_USER_DIR="$FLATPAK_USER_DIR" --filesystem="$FLATPAK_USER_DIR" org.flatpak.Builder --user --disable-rofiles-fuse --repo="$work/repo" "$work/build" "$candidate/com.hiddentunes.HiddenTunes.yml" 2>&1 | tee "$evidence/build.log"
 export HT_FLATPAK_BUILD=PASS
 # Only this newly created local CI repository is unsigned; the upstream Flathub
 # remote above retains its standard signature verification.
