@@ -1,0 +1,41 @@
+name: Qualify Snap confinement startup
+on:
+  push:
+    branches: [qualification-1.0.1]
+    paths:
+      - '.github/workflows/qualify-snap-confinement.yml'
+      - '.github/workflows/scripts/snap-confinement.sh'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: snap-confinement-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  confinement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check out the previously qualified packaging recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 5ebd60d7871f7205ebcef902bbc1a820e8dca4bb
+          path: qualified-input
+          persist-credentials: false
+      - name: Verify bounded offline startup under strict confinement
+        env:
+          HT_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash .github/workflows/scripts/snap-confinement.sh
+      - name: Upload text evidence only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: snap-confinement-evidence
+          path: snap-confinement-evidence/
+          if-no-files-found: warn
