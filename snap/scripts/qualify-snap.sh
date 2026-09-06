@@ -23,6 +23,7 @@ sha256sum "$artifact" > evidence/snap-sha256.txt
 unsquashfs -d unpacked "$artifact"
 python3 scripts/verify-payload.py 'original/opt/Hidden Tunes Desktop' 'unpacked/opt/Hidden Tunes Desktop' > evidence/payload-parity.json
 cp unpacked/meta/snap.yaml evidence/snap.yaml
+find unpacked/meta/gui -maxdepth 1 -type f -printf '%f\n' | tee evidence/packaged-desktop-files.txt
 # The source desktop file deliberately uses Canonical's ${SNAP} placeholder.
 # Validate the actual desktop entry after snapd expands it during installation.
 installed=no
@@ -34,6 +35,7 @@ snap list hiddentunes | tee evidence/installed.txt
 [[ "$(snap list hiddentunes | awk 'NR==2 {print $2}')" == 1.0.1 ]]
 snap connections hiddentunes > evidence/connections.txt
 mapfile -t desktop_entries < <(find /var/lib/snapd/desktop/applications -maxdepth 1 -name 'hiddentunes_*.desktop' -type f)
+printf '%s\n' "${desktop_entries[@]}" | tee evidence/exported-desktop-files.txt
 [[ "${#desktop_entries[@]}" == 1 ]]
 desktop_entry="${desktop_entries[0]}"
 desktop-file-validate "$desktop_entry"

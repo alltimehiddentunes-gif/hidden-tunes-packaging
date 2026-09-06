@@ -24,7 +24,7 @@ plugs:
 apps:
   hiddentunes:
     command: bin/hidden-tunes-launch
-    desktop: meta/gui/hidden-tunes.desktop
+    desktop: meta/gui/hiddentunes.desktop
     extensions: [gnome]
     plugs:
       - network
@@ -56,3 +56,4 @@ parts:
     override-build: |
       craftctl default
       chmod 0755 "${CRAFT_PART_INSTALL}/bin/hidden-tunes-launch"
+      mv "${CRAFT_PART_INSTALL}/meta/gui/hidden-tunes.desktop" "${CRAFT_PART_INSTALL}/meta/gui/hiddentunes.desktop"
