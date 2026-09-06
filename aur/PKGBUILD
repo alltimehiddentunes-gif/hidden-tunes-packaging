@@ -16,7 +16,8 @@ depends=('alsa-lib' 'at-spi2-core' 'cairo' 'dbus' 'expat' 'gcc-libs'
          'xdg-utils')
 provides=("hidden-tunes-desktop=${pkgver}")
 conflicts=('hidden-tunes-desktop')
-options=('!strip' '!debug')
+# Preserve every upstream file, including the compressed Debian changelog.
+options=('!strip' '!debug' '!purge' '!zipman' 'docs')
 _deb="Hidden-Tunes-Desktop-${pkgver}-amd64.deb"
 source=("https://downloads.hiddentunes.com/desktop/linux/${pkgver}/${_deb}"
         'Hidden-Tunes-Desktop-EULA-1.0.md')

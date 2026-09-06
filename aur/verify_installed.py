@@ -39,6 +39,10 @@ else:
             assert actual == expected['sha256'], f'payload bytes changed: {path}'
     result['checks'].append('every original application payload file is byte-identical')
     app = Path('/opt/Hidden Tunes Desktop')
+    expected_app_files = {name.removeprefix('opt/Hidden Tunes Desktop/') for name in audit['files'] if name.startswith('opt/Hidden Tunes Desktop/')}
+    actual_app_files = {path.relative_to(app).as_posix() for path in app.rglob('*') if path.is_file() or path.is_symlink()}
+    assert actual_app_files == expected_app_files, 'application file set differs from the original payload'
+    assert len(audit['elf']) == 8 and all(name.startswith('opt/Hidden Tunes Desktop/') for name in audit['elf']), 'unexpected ELF inventory or layout'
     assert (app / 'chrome-sandbox').stat().st_mode & 0o7777 == 0o755
     assert os.readlink('/usr/bin/hidden-tunes-desktop') == str(app / 'hidden-tunes-desktop')
     assert hashlib.sha256(Path(extra[1]).read_bytes()).hexdigest() == 'db525424eb2152b7da2a2313efe6644ab4ae6fee9cbcd887b03b9abbbadecfae'

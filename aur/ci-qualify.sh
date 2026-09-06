@@ -26,32 +26,37 @@ mapfile -t packages < <(runuser -u builder -- makepkg --packagelist)
 sha256sum "${packages[0]}" > evidence/ARCH-PACKAGE-SHA256.txt
 namcap PKGBUILD > evidence/namcap-PKGBUILD.txt 2>&1
 namcap "${packages[0]}" > evidence/namcap-package.txt 2>&1
+# The official container omits usr/share/doc/* at installation. Preserve its
+# config and override only this package's documentation in a test-only copy.
+cp /etc/pacman.conf evidence/pacman-original.conf
+cp /etc/pacman.conf evidence/pacman-test.conf
+printf '\n[options]\nNoExtract = !usr/share/doc/hidden-tunes-desktop/*\n' >> evidence/pacman-test.conf
+pacman-conf --config "$PWD/evidence/pacman-original.conf" NoExtract > evidence/noextract-original.txt
+pacman-conf --config "$PWD/evidence/pacman-test.conf" NoExtract > evidence/noextract-test.txt
 if pacman -Q hiddentunes >/dev/null 2>&1; then
   printf '%s\n' 'Refusing to disturb a pre-existing Hidden Tunes installation.' >&2
   exit 1
 fi
 cleanup() {
   if pacman -Q hiddentunes >/dev/null 2>&1; then
-    pacman -Rns --noconfirm hiddentunes
+    pacman --config "$PWD/evidence/pacman-test.conf" -Rns --noconfirm hiddentunes
   fi
 }
 trap cleanup EXIT
-pacman -U --noconfirm "${packages[0]}"
+pacman --config "$PWD/evidence/pacman-test.conf" -U --noconfirm "${packages[0]}"
 pacman -Q hiddentunes | tee evidence/installed-version.txt
 grep -qx 'hiddentunes 1.0.1-1' evidence/installed-version.txt
-pacman -Qk hiddentunes | tee evidence/pacman-file-check.txt
+pacman --config "$PWD/evidence/pacman-test.conf" -Qk hiddentunes | tee evidence/pacman-file-check.txt
 pacman -Ql hiddentunes > evidence/installed-files.txt
 desktop-file-validate /usr/share/applications/hidden-tunes-desktop.desktop
 python verify_installed.py installed evidence/DEB-PAYLOAD-AUDIT.json evidence/installed-compatibility.json
-pacman -Rns --noconfirm hiddentunes
+pacman --config "$PWD/evidence/pacman-test.conf" -Rns --noconfirm hiddentunes
 ! pacman -Q hiddentunes >/dev/null 2>&1
 python verify_installed.py uninstalled evidence/DEB-PAYLOAD-AUDIT.json evidence/uninstall-compatibility.json
 trap - EXIT
-# Namcap can exit zero while reporting errors; preserve warnings and fail errors.
-if grep -E '(^|[[:space:]])E:' evidence/namcap-PKGBUILD.txt evidence/namcap-package.txt; then
-  printf '%s\n' 'Namcap errors remain; package is not qualified.' >&2
-  exit 1
-fi
-printf '%s\n' 'PASS: source checksum, makepkg, generated SRCINFO, namcap error gate, ELF dependencies, byte identity, package install/version/file checks and uninstall.' > evidence/RESULT.txt
+# Retain every raw diagnostic. Only the documented original Electron /opt
+# placement diagnostic is reviewed; any other namcap error fails qualification.
+python check_namcap.py evidence
+printf '%s\n' 'PASS with documented opt/ placement exception: source checksum, makepkg, generated SRCINFO, reviewed namcap diagnostics, ELF dependencies, byte identity, package install/version/file checks and uninstall.' > evidence/RESULT.txt
 printf '%s\n' 'No application launch or functional playback/authentication testing was performed.' >> evidence/RESULT.txt
 cat evidence/RESULT.txt
