@@ -1,0 +1,42 @@
+# Maintainer: Hidden Tunes <support at hiddentunes dot com>
+# Uses the unmodified official proprietary release; no application source build.
+pkgname=hiddentunes
+pkgver=1.0.1
+pkgrel=1
+pkgdesc='Hidden Tunes Desktop music, radio, podcasts, audiobooks and television player'
+arch=('x86_64')
+url='https://hiddentunes.com'
+license=('LicenseRef-Hidden-Tunes-Desktop-EULA')
+# Direct ELF requirements plus upstream DEB runtime integrations (dlopen/xdg).
+depends=('alsa-lib' 'at-spi2-core' 'cairo' 'dbus' 'expat' 'gcc-libs'
+         'glib2' 'glibc' 'gtk3' 'libcups' 'libnotify' 'libsecret'
+         'libx11' 'libxcb' 'libxcomposite' 'libxdamage' 'libxext'
+         'libxfixes' 'libxkbcommon' 'libxrandr' 'libxss' 'libxtst'
+         'mesa' 'nspr' 'nss' 'pango' 'systemd-libs' 'util-linux-libs'
+         'xdg-utils')
+provides=("hidden-tunes-desktop=${pkgver}")
+conflicts=('hidden-tunes-desktop')
+options=('!strip' '!debug')
+_deb="Hidden-Tunes-Desktop-${pkgver}-amd64.deb"
+source=("https://downloads.hiddentunes.com/desktop/linux/${pkgver}/${_deb}"
+        'Hidden-Tunes-Desktop-EULA-1.0.md')
+noextract=("${_deb}")
+sha256sums=('d858bff4cf38db047f2d1c5ae40600df53ec0870313e6d2715d5678449e5eb22'
+            'db525424eb2152b7da2a2313efe6644ab4ae6fee9cbcd887b03b9abbbadecfae')
+
+package() {
+  # Only data.tar.xz is consumed; Debian postinst/postrm are not executed.
+  bsdtar -xOf "${srcdir}/${_deb}" data.tar.xz |
+    bsdtar -xJf - -C "${pkgdir}"
+  install -d "${pkgdir}/usr/bin"
+  ln -s '/opt/Hidden Tunes Desktop/hidden-tunes-desktop' \
+    "${pkgdir}/usr/bin/hidden-tunes-desktop"
+  # Normalize only an icon's file mode, preserving its content and all binaries.
+  chmod 0644 "${pkgdir}/usr/share/icons/hicolor/1024x1024/apps/hidden-tunes-desktop.png"
+  install -Dm644 "${srcdir}/Hidden-Tunes-Desktop-EULA-1.0.md" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/EULA.md"
+  install -Dm644 "${pkgdir}/opt/Hidden Tunes Desktop/LICENSE.electron.txt" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE.electron.txt"
+  install -Dm644 "${pkgdir}/opt/Hidden Tunes Desktop/LICENSES.chromium.html" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSES.chromium.html"
+}
