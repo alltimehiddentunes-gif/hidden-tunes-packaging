@@ -59,9 +59,11 @@ if [[ $metadata_exit == 0 ]]; then export HT_FLATPAK_METADATA_LINT=PASS; else ex
 if [[ $manifest_exit == 0 ]]; then export HT_FLATPAK_MANIFEST_LINT=PASS; else export HT_FLATPAK_MANIFEST_LINT="FAIL ($manifest_exit)"; fi
 
 desktop-file-validate "$candidate/com.hiddentunes.HiddenTunes.desktop"
-# Builder's own Flatpak redirects XDG_DATA_HOME. Pass this explicit, supported
-# user-installation override so it sees only this job's freshly installed SDK.
-flatpak run --env=FLATPAK_USER_DIR="$FLATPAK_USER_DIR" --filesystem="$FLATPAK_USER_DIR" org.flatpak.Builder --user --disable-rofiles-fuse --repo="$work/repo" "$work/build" "$candidate/com.hiddentunes.HiddenTunes.yml" 2>&1 | tee "$evidence/build.log"
+# The official default wrapper hardcodes HOME/.local/share/flatpak. Invoke its
+# same builder directly, preserving the host Flatpak binding and this job's
+# isolated installation rather than letting that wrapper replace the directory.
+flatpak_binary=$(command -v flatpak)
+flatpak run --command=flatpak-builder --env=FLATPAK_BINARY="$flatpak_binary" --env=FLATPAK_USER_DIR="$FLATPAK_USER_DIR" --filesystem="$FLATPAK_USER_DIR" org.flatpak.Builder --user --disable-rofiles-fuse --repo="$work/repo" "$work/build" "$candidate/com.hiddentunes.HiddenTunes.yml" 2>&1 | tee "$evidence/build.log"
 export HT_FLATPAK_BUILD=PASS
 # Only this newly created local CI repository is unsigned; the upstream Flathub
 # remote above retains its standard signature verification.
