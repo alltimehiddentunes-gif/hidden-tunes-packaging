@@ -1,0 +1,39 @@
+name: Qualify Chocolatey package
+
+on:
+  push:
+    branches: [qualification-1.0.1]
+    paths:
+      - chocolatey/**
+      - .github/workflows/qualify-chocolatey.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out packaging definitions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check silent install, version, and uninstall
+        env:
+          HT_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: ./chocolatey/scripts/Verify-ChocolateyPackage.ps1
+      - name: Save qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chocolatey-package-evidence
+          path: |
+            chocolatey/ci-results/package-result.json
+            chocolatey/ci-results/choco-*.log
+          if-no-files-found: warn
+          retention-days: 14

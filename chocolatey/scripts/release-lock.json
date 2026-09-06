@@ -1,0 +1,15 @@
+{
+  "packageId": "hidden-tunes",
+  "version": "1.0.1",
+  "installerUrl": "https://downloads.hiddentunes.com/desktop/windows/1.0.1/Hidden-Tunes-Desktop-1.0.1-win-x64.exe",
+  "installerSha256": "3b8f17048e441ee9cfd9e59b2cab529a3372d3bee61d888796b1ba67be6df40b",
+  "installerArguments": "/S /currentuser",
+  "uninstallProductCode": "7ac3b9d9-a2ab-59e0-9fa4-b8f102a0c89e",
+  "publisher": "Hidden Tunes",
+  "applicationFile": "Hidden Tunes Desktop.exe",
+  "applicationSha256": "81e4a5dd65eb4f32cbe6e89b3e6016faffa9c8ca2c01a53420eaa05999593faf",
+  "applicationFileVersion": "1.0.1",
+  "applicationProductVersion": "1.0.1.0",
+  "installScriptSha256": "fa6e32b5ab1754b46ada55ea5aee95c35ee0c98b8232bf02b15aaa2656bfe41c",
+  "uninstallScriptSha256": "084bff3ffe98f335346cc2665a20d7fa75f4ff36f105e18b2c3541b20ad8d42c"
+}

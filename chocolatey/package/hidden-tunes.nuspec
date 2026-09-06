@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>hidden-tunes</id>
+    <version>1.0.1</version>
+    <title>Hidden Tunes</title>
+    <authors>Hidden Tunes</authors>
+    <projectUrl>https://hiddentunes.com/</projectUrl>
+    <licenseUrl>https://hiddentunes.com/legal/desktop-eula</licenseUrl>
+    <summary>Catalog browsing and media playback with Hidden Tunes Desktop.</summary>
+    <description><![CDATA[Hidden Tunes Desktop offers catalog browsing and media playback.
+
+This package downloads the official, unchanged Windows x64 installer from downloads.hiddentunes.com. The application is proprietary and is governed by the publisher's Desktop EULA: https://hiddentunes.com/legal/desktop-eula.
+
+Installation is per-user for the Windows account running the installer. Install, upgrade, and uninstall using the same Windows account. Running Chocolatey under another administrator account or SYSTEM does not install this application for the original interactive user. This package does not provide an all-users installation.
+
+The package uses the installer's existing silent and current-user switches. Close Hidden Tunes before an installation, upgrade, or removal.]]></description>
+    <tags>hidden-tunes media audio desktop</tags>
+    <bugTrackerUrl>https://hiddentunes.com/support</bugTrackerUrl>
+  </metadata>
+  <files>
+    <file src="tools\chocolateyInstall.ps1" target="tools" />
+    <file src="tools\chocolateyUninstall.ps1" target="tools" />
+    <file src="tools\.skipAutoUninstall" target="tools" />
+  </files>
+</package>
