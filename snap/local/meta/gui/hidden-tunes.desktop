@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Hidden Tunes
+Exec=hiddentunes %U
+Terminal=false
+Type=Application
+Icon=${SNAP}/meta/gui/hidden-tunes.png
+StartupWMClass=Hidden Tunes Desktop
+Comment=Catalog browsing and media playback
+Categories=AudioVideo;Audio;Video;

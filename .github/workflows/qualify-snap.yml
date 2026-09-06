@@ -1,0 +1,36 @@
+name: Qualify Snap packaging
+on:
+  push:
+    branches: [qualification-1.0.1]
+    paths: ['snap/**', '.github/workflows/qualify-snap.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install official packaging tools on disposable runner
+        env:
+          HT_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$HT_RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = alltimehiddentunes-gif/hidden-tunes-packaging
+          sudo apt-get update
+          sudo apt-get install -y squashfs-tools desktop-file-utils
+          sudo snap install snapcraft --classic
+      - name: Build wrapper and check package registration
+        env:
+          HT_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash snap/scripts/qualify-snap.sh
+      - name: Upload text evidence only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: snap-evidence
+          path: snap/evidence/
+          if-no-files-found: warn

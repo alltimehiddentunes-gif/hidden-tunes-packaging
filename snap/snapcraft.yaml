@@ -1,0 +1,58 @@
+name: hiddentunes
+title: Hidden Tunes
+version: '1.0.1'
+summary: Catalog browsing and media playback
+description: |
+  Hidden Tunes Desktop provides catalog browsing and media playback.
+  The application is proprietary and is governed by the Desktop EULA:
+  https://hiddentunes.com/legal/desktop-eula
+base: core24
+grade: devel
+confinement: strict
+license: Proprietary
+website: https://hiddentunes.com
+contact: support@hiddentunes.com
+issues: https://hiddentunes.com/support
+platforms:
+  amd64:
+
+plugs:
+  browser-sandbox:
+    interface: browser-support
+    allow-sandbox: true
+
+apps:
+  hiddentunes:
+    command: bin/hidden-tunes-launch
+    desktop: meta/gui/hidden-tunes.desktop
+    extensions: [gnome]
+    plugs:
+      - network
+      - audio-playback
+      - browser-sandbox
+      - password-manager-service
+
+parts:
+  hidden-tunes:
+    plugin: dump
+    source: https://downloads.hiddentunes.com/desktop/linux/1.0.1/Hidden-Tunes-Desktop-1.0.1-amd64.deb
+    source-type: deb
+    source-checksum: sha256/d858bff4cf38db047f2d1c5ae40600df53ec0870313e6d2715d5678449e5eb22
+    stage-packages:
+      - libnss3
+      - libnspr4
+      - libxss1
+      - libxtst6
+      - libsecret-1-0
+      - libnotify4
+      - libasound2t64
+    override-build: |
+      craftctl default
+      install -Dm644 "${CRAFT_PART_INSTALL}/opt/Hidden Tunes Desktop/resources/brand/icon.png" "${CRAFT_PART_INSTALL}/meta/gui/hidden-tunes.png"
+  integration:
+    plugin: dump
+    source: local
+    source-type: local
+    override-build: |
+      craftctl default
+      chmod 0755 "${CRAFT_PART_INSTALL}/bin/hidden-tunes-launch"

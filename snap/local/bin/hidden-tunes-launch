@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec "$SNAP/opt/Hidden Tunes Desktop/hidden-tunes-desktop" "$@"
