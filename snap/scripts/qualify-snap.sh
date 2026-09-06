@@ -23,7 +23,8 @@ sha256sum "$artifact" > evidence/snap-sha256.txt
 unsquashfs -d unpacked "$artifact"
 python3 scripts/verify-payload.py 'original/opt/Hidden Tunes Desktop' 'unpacked/opt/Hidden Tunes Desktop' > evidence/payload-parity.json
 cp unpacked/meta/snap.yaml evidence/snap.yaml
-desktop-file-validate unpacked/meta/gui/hidden-tunes.desktop
+# The source desktop file deliberately uses Canonical's ${SNAP} placeholder.
+# Validate the actual desktop entry after snapd expands it during installation.
 installed=no
 cleanup() { if [[ "$installed" == yes ]]; then sudo snap remove --purge hiddentunes; fi; }
 trap cleanup EXIT
@@ -32,11 +33,17 @@ installed=yes
 snap list hiddentunes | tee evidence/installed.txt
 [[ "$(snap list hiddentunes | awk 'NR==2 {print $2}')" == 1.0.1 ]]
 snap connections hiddentunes > evidence/connections.txt
+mapfile -t desktop_entries < <(find /var/lib/snapd/desktop/applications -maxdepth 1 -name 'hiddentunes_*.desktop' -type f)
+[[ "${#desktop_entries[@]}" == 1 ]]
+desktop_entry="${desktop_entries[0]}"
+desktop-file-validate "$desktop_entry"
+cp "$desktop_entry" evidence/installed.desktop
 python3 scripts/verify-payload.py 'original/opt/Hidden Tunes Desktop' '/snap/hiddentunes/current/opt/Hidden Tunes Desktop' > evidence/installed-payload-parity.json
 sudo snap remove --purge hiddentunes
 installed=no
 if snap list hiddentunes >/dev/null 2>&1; then exit 1; fi
 [[ ! -e /snap/hiddentunes/current ]]
+[[ ! -e "$desktop_entry" ]]
 python3 - <<'PY' > evidence/package-result.json
 import json, os
 print(json.dumps({'status':'PASS','commit':os.environ['GITHUB_SHA'],'pack':'PASS','applicationBytes':'UNCHANGED','install':'PASS','version':'1.0.1','uninstall':'PASS','applicationLaunch':'NOT RUN BY DESIGN','functionalTesting':'NOT RUN BY DESIGN','confinementRuntime':'PENDING','storeSubmission':'BLOCKED: publisher authentication, terms, sandbox review and remaining qualification'},indent=2))

@@ -10,6 +10,8 @@ First CI run 34064701802 packed successfully and reported only lint warnings. It
 
 Remaining publication gates:
 
+The second run 34064967660 passed all 75 original file hashes and the explicit mode checks. Generic desktop validation rejected the unexpanded `${SNAP}` icon placeholder, which Canonical documents for Snap desktop entries. CI therefore validates snapd's actual installed desktop entry and checks its removal, rather than passing an unexpanded template to a generic validator. Reference: https://documentation.ubuntu.com/snapcraft/en/latest/how-to/crafting/configure-package-information/
+
 - `browser-support` with `allow-sandbox: true` requires trusted-publisher review and does not auto-connect. No `--no-sandbox` or classic-confinement fallback is introduced.
 - The password-manager-service interface is declared for the existing libsecret integration; connection and secure-store behavior under confinement remain unqualified.
 - Assess GNOME extension permissions, launch under confinement and necessary integration changes. Existing Desktop acceptance is preserved; repeated playback/auth/navigation qualification is not part of this package check.
