@@ -257,9 +257,15 @@ else:
 PY
 SESSION
 chmod 0644 "$evidence/session.sh"
+# The dedicated user cannot traverse the runner's private workspace. Place only
+# this harness script in its new home; keep it root-owned and read-only.
+sudo install -o root -g root -m 0444 "$evidence/session.sh" "$test_home/session.sh"
 stage=offline_startup
 set +e
-sudo -u "$test_user" env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR="$runtime_dir" timeout --signal=TERM --kill-after=10s 100s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' bash "$evidence/session.sh"
+(
+  cd /
+  sudo -u "$test_user" env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR="$runtime_dir" timeout --signal=TERM --kill-after=10s 100s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' bash "$test_home/session.sh"
+)
 session_rc=$?
 set -e
 # Copy only explicit text evidence before deleting the dedicated test account.
