@@ -30,7 +30,7 @@ modules:
       - install -Dm755 hidden-tunes /app/bin/hidden-tunes
       - install -Dm644 com.hiddentunes.HiddenTunes.desktop /app/share/applications/com.hiddentunes.HiddenTunes.desktop
       - install -Dm644 com.hiddentunes.HiddenTunes.metainfo.xml /app/share/metainfo/com.hiddentunes.HiddenTunes.metainfo.xml
-      - install -Dm644 com.hiddentunes.HiddenTunes.png /app/share/icons/hicolor/1024x1024/apps/com.hiddentunes.HiddenTunes.png
+      - install -Dm644 com.hiddentunes.HiddenTunes.png /app/share/icons/hicolor/512x512/apps/com.hiddentunes.HiddenTunes.png
       - install -Dm644 Hidden-Tunes-Desktop-EULA-1.0.md /app/share/licenses/com.hiddentunes.HiddenTunes/Hidden-Tunes-Desktop-EULA-1.0.md
       - ln -s /app/extra/hidden-tunes/LICENSE.electron.txt /app/share/licenses/com.hiddentunes.HiddenTunes/LICENSE.electron.txt
       - ln -s /app/extra/hidden-tunes/LICENSES.chromium.html /app/share/licenses/com.hiddentunes.HiddenTunes/LICENSES.chromium.html

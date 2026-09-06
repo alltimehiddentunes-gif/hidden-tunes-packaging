@@ -11,7 +11,7 @@
     <name>Hidden Tunes</name>
   </developer>
   <description>
-    <p>Hidden Tunes Desktop provides catalog browsing and media playback.</p>
+    <p>Hidden Tunes Desktop provides catalog browsing and media playback in a desktop application for Linux.</p>
   </description>
   <launchable type="desktop-id">com.hiddentunes.HiddenTunes.desktop</launchable>
   <url type="homepage">https://hiddentunes.com/</url>

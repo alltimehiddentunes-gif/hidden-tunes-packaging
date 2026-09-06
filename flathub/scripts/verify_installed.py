@@ -16,6 +16,9 @@ owned = Path(os.environ['XDG_DATA_HOME']).resolve() / 'flatpak' / 'app' / 'com.h
 if not installed.is_relative_to(owned):
     raise RuntimeError('Installed ref is outside the isolated Flatpak installation')
 record = json.loads((candidate / 'release-inspection.json').read_text())
+lock = json.loads((candidate / 'release-lock.json').read_text())
+if record['iconSha256'] != lock['originalDebIconSha256']:
+    raise RuntimeError('Original DEB icon evidence differs from the release lock')
 app = installed / 'files' / 'extra' / 'hidden-tunes'
 actual_names = {str(p.relative_to(app)).replace('\\', '/') for p in app.rglob('*') if p.is_file()}
 if actual_names != set(record['payloadHashes']):
@@ -30,9 +33,12 @@ with executable.open('rb') as stream:
 if header[:4] != b'\x7fELF' or header[4] != 2 or struct.unpack_from('<H', header, 18)[0] != 62:
     raise RuntimeError('Expected original ELF64 x86_64 executable')
 metadata = installed / 'files' / 'share'
-icon = metadata / 'icons' / 'hicolor' / '1024x1024' / 'apps' / 'com.hiddentunes.HiddenTunes.png'
-if hashlib.sha256(icon.read_bytes()).hexdigest() != record['iconSha256']:
-    raise RuntimeError('Exported icon differs from the unchanged upstream icon')
+icon = metadata / 'icons' / 'hicolor' / '512x512' / 'apps' / 'com.hiddentunes.HiddenTunes.png'
+icon_bytes = icon.read_bytes()
+if hashlib.sha256(icon_bytes).hexdigest() != lock['integrationIconSha256']:
+    raise RuntimeError('Exported integration icon differs from the approved existing website asset')
+if list(struct.unpack_from('>II', icon_bytes, 16)) != lock['integrationIconDimensions']:
+    raise RuntimeError('Exported integration icon dimensions differ from the release lock')
 for relative in ['applications/com.hiddentunes.HiddenTunes.desktop', 'metainfo/com.hiddentunes.HiddenTunes.metainfo.xml']:
     if not (metadata / relative).is_file():
         raise RuntimeError(f'Missing integration metadata: {relative}')
@@ -41,6 +47,8 @@ print(json.dumps({
     'payloadFilesVerified': len(actual_names),
     'payloadByteParity': 'PASS',
     'architecture': 'ELF64 x86_64',
-    'upstreamIconParity': 'PASS',
+    'originalApplicationIconParity': 'PASS (included in all original payload file hashes)',
+    'integrationIconParity': 'PASS (unchanged approved website asset)',
+    'integrationIconDimensions': lock['integrationIconDimensions'],
     'applicationExecution': 'NOT RUN BY DESIGN',
 }, indent=2))

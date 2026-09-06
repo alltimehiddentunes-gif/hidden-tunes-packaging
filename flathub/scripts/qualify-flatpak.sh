@@ -33,6 +33,9 @@ import datetime, json, os
 from pathlib import Path
 keys = ['BUILD','INSTALL','IDENTITY','LINKER','UNINSTALL','METADATA_LINT','MANIFEST_LINT']
 result = {k.lower(): os.environ['HT_FLATPAK_' + k] for k in keys}
+for key in result:
+    if result[key] == 'RUNNING':
+        result[key] = 'FAIL'
 result.update(repositoryCommit=os.environ['GITHUB_SHA'], completedUtc=datetime.datetime.now(datetime.timezone.utc).isoformat(), exitCode=int(os.environ['HT_FLATPAK_EXIT_CODE']), applicationLaunch='NOT RUN BY DESIGN', functionalRequalification='NOT RUN BY DESIGN', flathubSubmission='BLOCKED: owner metadata and independent human submission gates remain')
 result['technicalPackageChecks'] = 'PASS' if all(result[k] == 'PASS' for k in ('build','install','identity','linker','uninstall')) and result['exitCode'] == 0 else 'FAIL'
 (Path(os.environ['HT_FLATPAK_EVIDENCE']) / 'package-result.json').write_text(json.dumps(result, indent=2) + '\n')
@@ -63,16 +66,19 @@ desktop-file-validate "$candidate/com.hiddentunes.HiddenTunes.desktop"
 # same builder directly, preserving the host Flatpak binding and this job's
 # isolated installation rather than letting that wrapper replace the directory.
 flatpak_binary=$(command -v flatpak)
+export HT_FLATPAK_BUILD=RUNNING
 flatpak run --command=flatpak-builder --env=FLATPAK_BINARY="$flatpak_binary" --env=FLATPAK_USER_DIR="$FLATPAK_USER_DIR" --filesystem="$FLATPAK_USER_DIR" org.flatpak.Builder --user --disable-rofiles-fuse --repo="$work/repo" "$work/build" "$candidate/com.hiddentunes.HiddenTunes.yml" 2>&1 | tee "$evidence/build.log"
 export HT_FLATPAK_BUILD=PASS
 # Only this newly created local CI repository is unsigned; the upstream Flathub
 # remote above retains its standard signature verification.
 flatpak remote-add --user --no-gpg-verify hiddentunes-ci "file://$work/repo"
+export HT_FLATPAK_INSTALL=RUNNING
 flatpak install --user -y hiddentunes-ci "$app_id" 2>&1 | tee "$evidence/install.log"
 installed=true
 export HT_FLATPAK_INSTALL=PASS
 flatpak info --user --show-metadata "$app_id" | tee "$evidence/installed-metadata.log"
 location=$(flatpak info --user --show-location "$app_id")
+export HT_FLATPAK_IDENTITY=RUNNING
 python3 "$candidate/scripts/verify_installed.py" "$location" | tee "$evidence/installed-identity.log"
 export HT_FLATPAK_IDENTITY=PASS
 
@@ -80,9 +86,11 @@ export HT_FLATPAK_IDENTITY=PASS
 # dependencies. The application entry point, Electron, and renderer never run.
 interpreter=$(readelf -l "$location/files/extra/hidden-tunes/hidden-tunes-desktop" | sed -n 's/.*Requesting program interpreter: \([^]]*\)].*/\1/p')
 [[ $interpreter == /lib64/ld-linux-x86-64.so.2 ]]
+export HT_FLATPAK_LINKER=RUNNING
 flatpak run --user --unshare=network --nosocket=x11 --nosocket=pulseaudio --command="$interpreter" "$app_id" --list /app/extra/hidden-tunes/hidden-tunes-desktop 2>&1 | tee "$evidence/runtime-linker.log"
 if grep -q 'not found' "$evidence/runtime-linker.log"; then echo 'Runtime dependency missing' >&2; exit 1; fi
 export HT_FLATPAK_LINKER=PASS
+export HT_FLATPAK_UNINSTALL=RUNNING
 flatpak uninstall --user -y "$app_id" 2>&1 | tee "$evidence/uninstall.log"
 installed=false
 if flatpak info --user "$app_id" >/dev/null 2>&1; then echo 'Application ref remains after uninstall' >&2; exit 1; fi
