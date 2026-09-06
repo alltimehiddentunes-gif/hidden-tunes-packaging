@@ -6,6 +6,8 @@ The candidate uses supported core24 with Canonical's GNOME extension, strict con
 
 The preliminary runtime library list follows the existing DEB's requirements plus NSS/NSPR and audio dependencies; Snapcraft's library lint and actual confinement checks must establish sufficiency. The package does not execute Debian post-install or removal scripts.
 
+First CI run 34064701802 packed successfully and reported only lint warnings. Its parity check stopped because Snapcraft normalized the non-executable `resources/brand/icon.png` mode from 0664 to 0644. The verifier now explicitly records and permits only this observed removal of group-write permission; exact file inventory, all 75 file hashes and every other mode (especially sandbox 0755) remain required. No installer, executable or application data bytes were changed. GPU/vendor-library and unused-library lint warnings remain visible in the retained evidence.
+
 Remaining publication gates:
 
 - `browser-support` with `allow-sandbox: true` requires trusted-publisher review and does not auto-connect. No `--no-sandbox` or classic-confinement fallback is introduced.
