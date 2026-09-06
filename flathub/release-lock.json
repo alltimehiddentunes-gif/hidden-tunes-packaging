@@ -1,0 +1,22 @@
+{
+  "version": "1.0.1",
+  "appId": "com.hiddentunes.HiddenTunes",
+  "debUrl": "https://downloads.hiddentunes.com/desktop/linux/1.0.1/Hidden-Tunes-Desktop-1.0.1-amd64.deb",
+  "debSha256": "d858bff4cf38db047f2d1c5ae40600df53ec0870313e6d2715d5678449e5eb22",
+  "debSize": 146881864,
+  "architecture": "x86_64",
+  "packageArchitecture": "amd64",
+  "runtime": "org.freedesktop.Platform",
+  "baseApp": "org.electronjs.Electron2.BaseApp",
+  "runtimeBranch": "25.08",
+  "runtimeSelectionEvidence": "Official Electron BaseApp branches checked 2026-09-07; 25.08 is the newest listed version. Actual Flatpak remote refs are captured again by CI.",
+  "eulaUrl": "https://hiddentunes.com/legal/desktop-eula",
+  "eulaSha256": "db525424eb2152b7da2a2313efe6644ab4ae6fee9cbcd887b03b9abbbadecfae",
+  "iconSha256": "f75e42cf62a59f8a53de13244afa207e7ac54a3743b3c0c369fcc36eab283c6d",
+  "submissionReady": false,
+  "metadataLicenseApproved": false,
+  "oarsAssessmentApproved": false,
+  "screenshotsApproved": false,
+  "publicReleaseDateConfirmed": false,
+  "sourceAvailableBinaryExceptionConfirmed": false
+}

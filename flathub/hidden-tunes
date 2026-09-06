@@ -1,0 +1,4 @@
+#!/bin/sh
+# The documented Electron BaseApp wrapper preserves sandboxing.
+# No application code, payload, desktopName, or security switches are changed.
+exec zypak-wrapper /app/extra/hidden-tunes/hidden-tunes-desktop "$@"

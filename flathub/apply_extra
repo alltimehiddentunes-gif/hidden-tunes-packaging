@@ -1,0 +1,18 @@
+#!/bin/bash
+set -euo pipefail
+# Flatpak calls this inside its extra-data sandbox. Never use it as a host installer.
+test "$(pwd -P)" = /app/extra || { echo 'Refusing extraction outside /app/extra' >&2; exit 1; }
+test -f /.flatpak-info || { echo 'Flatpak sandbox metadata missing' >&2; exit 1; }
+test ! -e hidden-tunes
+test ! -e data.tar.xz
+test "$(stat -c %s hidden-tunes-1.0.1-amd64.deb)" = 146881864
+printf '%s  %s\n' d858bff4cf38db047f2d1c5ae40600df53ec0870313e6d2715d5678449e5eb22 hidden-tunes-1.0.1-amd64.deb | sha256sum --check --strict
+# Extract only the qualified application directory, never Debian maintainer scripts.
+bsdtar -xf hidden-tunes-1.0.1-amd64.deb data.tar.xz
+mkdir hidden-tunes
+bsdtar -xf data.tar.xz --strip-components=3 -C hidden-tunes './opt/Hidden Tunes Desktop/'
+test -x hidden-tunes/hidden-tunes-desktop
+test -f hidden-tunes/resources/app.asar
+# Keep every application byte, including upstream OSS notices, unchanged.
+# Cleanup only these two fixed regular files in the verified /app/extra directory.
+rm -- data.tar.xz hidden-tunes-1.0.1-amd64.deb

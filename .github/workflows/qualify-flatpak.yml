@@ -1,0 +1,50 @@
+# Copy to .github/workflows/qualify-flatpak.yml in the packaging-only repository.
+name: Qualify Flatpak package
+on:
+  push:
+    branches: [qualification-1.0.1]
+    paths: [flathub/**, .github/workflows/qualify-flatpak.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out packaging metadata
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install distribution tools in the disposable runner
+        env:
+          HT_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          [[ ${GITHUB_ACTIONS:-} == true && ${HT_RUNNER_ENVIRONMENT:-} == github-hosted && ${RUNNER_OS:-} == Linux ]]
+          [[ ${GITHUB_REPOSITORY:-} == alltimehiddentunes-gif/hidden-tunes-packaging ]]
+          [[ $(uname -m) == x86_64 && $(id -u) != 0 && ${USER:-} != Wills ]]
+          sudo apt-get update
+          sudo apt-get install --yes flatpak binutils desktop-file-utils dbus-x11
+      - name: Check package integration without launching Hidden Tunes
+        env:
+          HT_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: dbus-run-session -- bash flathub/scripts/qualify-flatpak.sh
+      - name: Save text evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flatpak-package-evidence
+          path: ci-results/flathub/*.log
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Save package result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flatpak-package-result
+          path: ci-results/flathub/package-result.json
+          if-no-files-found: warn
+          retention-days: 14

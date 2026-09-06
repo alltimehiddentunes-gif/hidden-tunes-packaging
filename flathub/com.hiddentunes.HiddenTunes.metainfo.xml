@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LOCAL TECHNICAL CANDIDATE: no metadata license grant is declared. -->
+<component type="desktop-application">
+  <id>com.hiddentunes.HiddenTunes</id>
+  <!-- This deliberately unresolved marker must fail submission validation. -->
+  <metadata_license>LicenseRef-owner-approval-pending</metadata_license>
+  <project_license>LicenseRef-proprietary=https://hiddentunes.com/legal/desktop-eula</project_license>
+  <name>Hidden Tunes Desktop</name>
+  <summary>Browse the catalog and play media</summary>
+  <developer id="com.hiddentunes">
+    <name>Hidden Tunes</name>
+  </developer>
+  <description>
+    <p>Hidden Tunes Desktop provides catalog browsing and media playback.</p>
+  </description>
+  <launchable type="desktop-id">com.hiddentunes.HiddenTunes.desktop</launchable>
+  <url type="homepage">https://hiddentunes.com/</url>
+  <url type="contact">https://hiddentunes.com/support</url>
+  <!-- OARS must come from an informed content assessment, not an empty rating. -->
+  <!-- An approved screenshot URL is required; no screenshot was invented. -->
+  <releases>
+    <!-- Actual public release date is unresolved; DEB build time is not proof. -->
+    <release version="1.0.1" />
+  </releases>
+</component>

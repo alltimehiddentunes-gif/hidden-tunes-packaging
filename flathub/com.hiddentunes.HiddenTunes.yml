@@ -1,0 +1,56 @@
+# Technical candidate only. See TECHNICAL-READINESS.md before any submission.
+app-id: com.hiddentunes.HiddenTunes
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+default-branch: stable
+separate-locales: false
+# Legal/rating/screenshot metadata is intentionally unfinished. Technical CI
+# records real metadata validation separately; this is not a submission bypass.
+appstream-compose: false
+command: hidden-tunes
+base: org.electronjs.Electron2.BaseApp
+base-version: '25.08'
+finish-args:
+  # Documented Electron X11/Xwayland profile; no native Wayland claim.
+  - --share=ipc
+  - --socket=x11
+  - --device=dri
+  # The existing application browses an online catalog and plays media.
+  - --share=network
+  - --socket=pulseaudio
+
+modules:
+  - name: hidden-tunes
+    buildsystem: simple
+    only-arches:
+      - x86_64
+    build-commands:
+      - install -Dm755 apply_extra /app/bin/apply_extra
+      - install -Dm755 hidden-tunes /app/bin/hidden-tunes
+      - install -Dm644 com.hiddentunes.HiddenTunes.desktop /app/share/applications/com.hiddentunes.HiddenTunes.desktop
+      - install -Dm644 com.hiddentunes.HiddenTunes.metainfo.xml /app/share/metainfo/com.hiddentunes.HiddenTunes.metainfo.xml
+      - install -Dm644 com.hiddentunes.HiddenTunes.png /app/share/icons/hicolor/1024x1024/apps/com.hiddentunes.HiddenTunes.png
+      - install -Dm644 Hidden-Tunes-Desktop-EULA-1.0.md /app/share/licenses/com.hiddentunes.HiddenTunes/Hidden-Tunes-Desktop-EULA-1.0.md
+      - ln -s /app/extra/hidden-tunes/LICENSE.electron.txt /app/share/licenses/com.hiddentunes.HiddenTunes/LICENSE.electron.txt
+      - ln -s /app/extra/hidden-tunes/LICENSES.chromium.html /app/share/licenses/com.hiddentunes.HiddenTunes/LICENSES.chromium.html
+    sources:
+      - type: extra-data
+        url: https://downloads.hiddentunes.com/desktop/linux/1.0.1/Hidden-Tunes-Desktop-1.0.1-amd64.deb
+        sha256: d858bff4cf38db047f2d1c5ae40600df53ec0870313e6d2715d5678449e5eb22
+        size: 146881864
+        filename: hidden-tunes-1.0.1-amd64.deb
+        only-arches:
+          - x86_64
+      - type: file
+        path: apply_extra
+      - type: file
+        path: hidden-tunes
+      - type: file
+        path: com.hiddentunes.HiddenTunes.desktop
+      - type: file
+        path: com.hiddentunes.HiddenTunes.metainfo.xml
+      - type: file
+        path: com.hiddentunes.HiddenTunes.png
+      - type: file
+        path: Hidden-Tunes-Desktop-EULA-1.0.md

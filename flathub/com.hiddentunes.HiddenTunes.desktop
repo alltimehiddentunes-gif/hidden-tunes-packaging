@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Hidden Tunes Desktop
+Comment=Browse the catalog and play media
+Exec=hidden-tunes %U
+Terminal=false
+Type=Application
+Icon=com.hiddentunes.HiddenTunes
+StartupWMClass=Hidden Tunes Desktop
+Categories=AudioVideo;Audio;Video;
