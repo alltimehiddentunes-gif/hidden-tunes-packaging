@@ -31,32 +31,54 @@ cleanup() {
   local failed=0
   local mounts=''
   local uid_quiescent=yes
+  local unit_state=''
+  local process_probe_rc=0
+  local command_log="$evidence/cleanup-commands.log"
   if [[ "$user_created" == yes ]]; then
     # The UID was allocated only after refusing an existing account/home.
     if ! [[ "$(id -u "$test_user")" == "$test_uid" && "$test_uid" =~ ^[0-9]+$ && "$test_uid" -ge 1000 ]]; then return 1; fi
     if [[ "$systemd_session_attempted" == yes ]]; then
       # Stop the newly enabled manager before killing processes: otherwise it
       # could respawn user services after the offline firewall is removed.
-      sudo loginctl disable-linger "$test_user" || { failed=1; uid_quiescent=no; }
-      if sudo loginctl show-user "$test_uid" --property=UID --value >/dev/null 2>&1; then
-        sudo timeout --signal=TERM --kill-after=5s 30s loginctl terminate-user "$test_uid" || { failed=1; uid_quiescent=no; }
-      fi
-      sudo timeout --signal=TERM --kill-after=5s 30s systemctl stop "user@$test_uid.service" "user-runtime-dir@$test_uid.service" || { failed=1; uid_quiescent=no; }
-      for unit in "user@$test_uid.service" "user-runtime-dir@$test_uid.service"; do
-        if [[ "$(systemctl show "$unit" --property=ActiveState --value)" != inactive ]]; then failed=1; uid_quiescent=no; fi
-      done
-      if [[ -e "/var/lib/systemd/linger/$test_user" || -L "/var/lib/systemd/linger/$test_user" ]]; then failed=1; uid_quiescent=no; fi
+      # disable-linger may already end this user before terminate-user runs.
+      # Retain command errors, then decide safety from verified final state.
+      sudo loginctl disable-linger "$test_user" >> "$command_log" 2>&1 || printf 'disable-linger exit %s; final-state check follows\n' "$?" >> "$command_log"
+      sudo timeout --signal=TERM --kill-after=5s 30s loginctl terminate-user "$test_uid" >> "$command_log" 2>&1 || printf 'terminate-user exit %s; final-state check follows\n' "$?" >> "$command_log"
+      sudo timeout --signal=TERM --kill-after=5s 30s systemctl stop "user@$test_uid.service" "user-runtime-dir@$test_uid.service" >> "$command_log" 2>&1 || printf 'systemctl stop exit %s; final-state check follows\n' "$?" >> "$command_log"
     fi
-    sudo pkill -TERM -u "$test_uid" || [[ "$?" == 1 ]] || failed=1
+    sudo pkill -TERM -u "$test_uid" >> "$command_log" 2>&1 || printf 'pkill TERM exit %s; final-state check follows\n' "$?" >> "$command_log"
     sleep 2
-    if pgrep -u "$test_uid" >/dev/null; then sudo pkill -KILL -u "$test_uid" || failed=1; sleep 1; fi
-    if pgrep -u "$test_uid" >/dev/null; then failed=1; uid_quiescent=no; fi
+    if pgrep -u "$test_uid" >/dev/null; then
+      sudo pkill -KILL -u "$test_uid" >> "$command_log" 2>&1 || printf 'pkill KILL exit %s; final-state check follows\n' "$?" >> "$command_log"
+      sleep 1
+    fi
+    pgrep -u "$test_uid" > "$evidence/cleanup-remaining-pids.txt" 2>> "$command_log"
+    process_probe_rc=$?
+    printf 'UID=%s\nprocessProbeExit=%s (1 means no matches)\n' "$test_uid" "$process_probe_rc" > "$evidence/cleanup-final-state.txt"
+    if [[ "$process_probe_rc" != 1 ]]; then failed=1; uid_quiescent=no; fi
+    if [[ "$systemd_session_attempted" == yes ]]; then
+      for unit in "user@$test_uid.service" "user-runtime-dir@$test_uid.service"; do
+        if unit_state="$(systemctl show "$unit" --property=ActiveState --value 2>> "$command_log")"; then
+          printf '%s=%s\n' "$unit" "$unit_state" >> "$evidence/cleanup-final-state.txt"
+          if [[ "$unit_state" != inactive ]]; then failed=1; uid_quiescent=no; fi
+        else
+          printf '%s=UNVERIFIED\n' "$unit" >> "$evidence/cleanup-final-state.txt"
+          failed=1; uid_quiescent=no
+        fi
+      done
+      if sudo test ! -e "/var/lib/systemd/linger/$test_user" && sudo test ! -L "/var/lib/systemd/linger/$test_user"; then
+        echo 'linger=absent' >> "$evidence/cleanup-final-state.txt"
+      else
+        echo 'linger=present-or-unverified' >> "$evidence/cleanup-final-state.txt"
+        failed=1; uid_quiescent=no
+      fi
+    fi
   fi
   if [[ "$uid_quiescent" == yes ]]; then
     if [[ "$firewall4" == yes ]]; then sudo iptables -D OUTPUT -m owner --uid-owner "$test_uid" -m comment --comment ht-snap-smoke -j REJECT || failed=1; fi
     if [[ "$firewall6" == yes ]]; then sudo ip6tables -D OUTPUT -m owner --uid-owner "$test_uid" -m comment --comment ht-snap-smoke -j REJECT || failed=1; fi
   else
-    echo 'UID processes survived termination; retaining outbound firewall rules'
+    echo 'UID manager/process final state is not verified stopped; retaining outbound firewall rules'
   fi
   if [[ "$installed" == yes ]]; then
     sudo snap remove --purge hiddentunes || failed=1
@@ -188,7 +210,7 @@ loginctl show-user "$test_uid" --property=UID --property=Linger --property=Runti
 bus_ready=no
 bus_deadline=$((SECONDS + 10))
 while (( SECONDS < bus_deadline )); do
-  if [[ -S "$runtime_dir/bus" && "$(stat -c %u "$runtime_dir/bus")" == "$test_uid" ]] &&
+  if sudo test -S "$runtime_dir/bus" && [[ "$(sudo stat -c %u "$runtime_dir/bus")" == "$test_uid" ]] &&
     sudo -u "$test_user" env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" timeout --signal=TERM --kill-after=1s 1s systemctl --user show --property=Version > "$evidence/user-manager-bus.txt" 2>&1 &&
     grep -q '^Version=.' "$evidence/user-manager-bus.txt"; then
     bus_ready=yes
