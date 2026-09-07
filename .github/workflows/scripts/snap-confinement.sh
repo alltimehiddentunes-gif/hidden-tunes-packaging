@@ -238,30 +238,102 @@ wmctrl -m > window-manager.txt
 # No application flags or product environment overrides; Electron sandbox retained.
 /snap/bin/hiddentunes > application.log 2>&1 &
 app_pid=$!
-python3 - <<'PY'
-import json, os, pathlib, re, subprocess, time
+python3 - "$app_pid" <<'PY'
+import json, os, pathlib, sys
+state = {'uid': os.getuid(), 'display': os.environ['DISPLAY'], 'xauthority': os.environ['XAUTHORITY'], 'launcherPid': int(sys.argv[1])}
+pathlib.Path('x11-session.tmp').write_text(json.dumps(state))
+os.replace('x11-session.tmp', 'x11-session.json')
+PY
+for attempt in {1..85}; do
+  [[ ! -e stop-observation ]] || exit 0
+  sleep 1
+done
+echo 'Host observer did not finish within the bounded session'
+exit 1
+SESSION
+
+cat > "$evidence/observer.py" <<'PY'
+import atexit, json, os, pathlib, re, stat, subprocess, sys, time
+
+if os.geteuid() != 0:
+    raise SystemExit('Host-root read-only observer required')
+uid = int(sys.argv[1])
+home = pathlib.Path(sys.argv[2])
+evidence = pathlib.Path(sys.argv[3])
+if uid < 1000 or home != pathlib.Path('/home/ht-snap-smoke'):
+    raise SystemExit('Unexpected isolated test identity')
+session_dir = home / 'evidence'
+expected_path = pathlib.Path('/snap/hiddentunes/current/opt/Hidden Tunes Desktop/hidden-tunes-desktop')
+expected_identity = expected_path.stat()
+result = {'status': 'FAIL', 'failureClassification': 'HARNESS_OBSERVATION_ERROR'}
+
+def finish():
+    (evidence / 'startup-evidence.json').write_text(json.dumps(result, indent=2))
+    # Fixed new-account path, no symlink following or shell interpolation.
+    fd = os.open(session_dir / 'stop-observation', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    os.close(fd)
+
+atexit.register(finish)
+
+def read_session_file(name, limit):
+    fd = os.open(session_dir / name, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_size > limit:
+            raise RuntimeError('Unexpected session evidence file kind, owner or size')
+        return stream.read(limit + 1).decode(errors='replace')
+
+ready_deadline = time.monotonic() + 10
+while True:
+    try:
+        session = json.loads(read_session_file('x11-session.json', 4096))
+        break
+    except FileNotFoundError:
+        if time.monotonic() >= ready_deadline:
+            result.update(failureClassification='HARNESS_SESSION_NOT_READY', reason='No X11 session state within 10 seconds')
+            raise SystemExit(1)
+        time.sleep(0.2)
+display = session.get('display', '')
+authority = pathlib.Path(session.get('xauthority', ''))
+launcher_pid = session.get('launcherPid')
+if session.get('uid') != uid or not re.fullmatch(r':[0-9]+(?:\.[0-9]+)?', display) or authority != home / '.Xauthority-smoke' or type(launcher_pid) is not int or launcher_pid <= 0:
+    raise RuntimeError('Invalid observed X11 session metadata')
+auth_info = authority.lstat()
+if not stat.S_ISREG(auth_info.st_mode) or auth_info.st_uid != uid:
+    raise RuntimeError('Xauthority is not a regular file owned by the test UID')
+
+def x11_query(args):
+    # X11 reads run as the fresh UID with exactly the observed display/cookie.
+    # No user sudo permission is granted and no argument is passed to a shell.
+    argv = ['/usr/bin/sudo', '-u', '#' + str(uid), 'env', '-i', 'HOME=' + str(home), 'USER=ht-snap-smoke', 'LOGNAME=ht-snap-smoke', 'PATH=/usr/bin:/bin', 'DISPLAY=' + display, 'XAUTHORITY=' + str(authority), *args]
+    return subprocess.run(argv, cwd='/', capture_output=True, text=True, timeout=3)
 
 root = pathlib.Path('/proc')
-uid = os.getuid()
-expected_exe = re.compile(r'^/snap/hiddentunes/[^/]+/opt/Hidden Tunes Desktop/hidden-tunes-desktop$')
 forbidden = {'--no-sandbox', '--disable-setuid-sandbox', '--disable-seccomp-filter-sandbox', '--disable-gpu-sandbox', '--single-process'}
 fatal = re.compile(r'No usable sandbox|SUID sandbox|FATAL:|Failed to move to new namespace|error while loading shared libraries|Missing X server|GPU process isn.t usable|The display compositor is frequently crashing', re.I)
 
 def processes():
     found = {}
+    unidentified = set()
     for path in root.iterdir():
         if not path.name.isdigit():
             continue
+        matched = False
+        status = None
         try:
-            if path.stat().st_uid != uid:
+            # Nondumpability can change /proc directory ownership. Real UID in
+            # status is the identity gate; foreign users are excluded first.
+            status = dict(line.split(':', 1) for line in (path / 'status').read_text().splitlines() if ':' in line)
+            if int(status['Uid'].split()[0]) != uid:
                 continue
+            actual = (path / 'exe').stat()
+            if (actual.st_dev, actual.st_ino) != (expected_identity.st_dev, expected_identity.st_ino):
+                continue
+            matched = True
             exe = os.readlink(path / 'exe')
-            if not expected_exe.fullmatch(exe):
-                continue
             argv = (path / 'cmdline').read_bytes().decode(errors='replace').rstrip('\0').split('\0')
             if any(arg.split('=', 1)[0] in forbidden for arg in argv):
                 raise RuntimeError('Sandbox-disabling application flag observed')
-            status = dict(line.split(':', 1) for line in (path / 'status').read_text().splitlines() if ':' in line)
             profile = (path / 'attr/current').read_text().strip()
             if profile != 'snap.hiddentunes.hiddentunes (enforce)' or status.get('Seccomp', '').strip() != '2':
                 raise RuntimeError('Application process is not under required enforcing Snap profile/seccomp filter')
@@ -269,35 +341,51 @@ def processes():
         except (FileNotFoundError, ProcessLookupError):
             continue
         except PermissionError as error:
-            pathlib.Path('startup-evidence.json').write_text(json.dumps({'status': 'FAIL', 'failureClassification': 'HARNESS_PERMISSION_LIMITATION', 'reason': str(error)}, indent=2))
-            raise RuntimeError('Cannot inspect required process evidence; this is a harness limitation, not proven app incompatibility') from error
-    return found
+            if matched or int(path.name) == launcher_pid:
+                result.update(failureClassification='HARNESS_PERMISSION_LIMITATION', reason=str(error))
+                raise RuntimeError('Required application process evidence inaccessible; no app incompatibility claim') from error
+            # An unidentified unrelated/helper process must not fail the app.
+            if status and int(status.get('Uid', '-1').split()[0]) == uid:
+                unidentified.add(int(path.name))
+    return found, unidentified
 
 deadline = time.monotonic() + 65
 first = None
 observations = []
 previous_signature = None
 while time.monotonic() < deadline:
-    log = pathlib.Path('application.log').read_text(errors='replace')
+    log = read_session_file('application.log', 1048576)
     if fatal.search(log):
+        result.update(failureClassification='STARTUP_DIAGNOSTIC', reason='Fatal startup/sandbox/loader diagnostic in application.log')
         raise RuntimeError('Fatal startup/sandbox/loader diagnostic; inspect application.log')
-    procs = processes()
-    windows = subprocess.run(['wmctrl', '-lp'], capture_output=True, text=True, check=True).stdout
+    procs, unidentified = processes()
+    query = x11_query(['wmctrl', '-lp'])
+    if query.returncode != 0:
+        result.update(failureClassification='HARNESS_X11_QUERY_FAILURE', reason=query.stderr)
+        raise SystemExit(1)
+    windows = query.stdout
     visible = []
     for line in windows.splitlines():
         parts = line.split(None, 4)
-        if len(parts) < 4 or not parts[2].isdigit():
+        if len(parts) < 4 or not re.fullmatch(r'0x[0-9A-Fa-f]+', parts[0]) or not parts[2].isdigit():
             continue
         pid = int(parts[2])
+        if pid in unidentified:
+            result.update(failureClassification='HARNESS_PERMISSION_LIMITATION', reason='Visible-window process executable identity inaccessible')
+            raise SystemExit(1)
         if pid not in procs:
             continue
-        info = subprocess.run(['xwininfo', '-id', parts[0]], capture_output=True, text=True)
+        info = x11_query(['xwininfo', '-id', parts[0]])
         if info.returncode != 0 or 'Map State: IsViewable' not in info.stdout:
             continue
-        props = subprocess.run(['xprop', '-id', parts[0], '_NET_WM_PID', 'WM_CLASS', '_NET_WM_NAME'], capture_output=True, text=True, check=True).stdout
+        prop_query = x11_query(['xprop', '-id', parts[0], '_NET_WM_PID', 'WM_CLASS', '_NET_WM_NAME'])
+        if prop_query.returncode != 0:
+            continue
+        props = prop_query.stdout
         if not re.search(r'_NET_WM_PID\([^)]*\) = ' + str(pid) + r'\b', props):
             raise RuntimeError('Window PID ownership evidence missing')
-        visible.append({'window': parts[0], 'pid': pid, 'title': parts[4] if len(parts) > 4 else '', 'properties': props})
+        visible.append({'window': parts[0], 'pid': pid, 'title': parts[4][:200] if len(parts) > 4 else '', 'properties': props})
+    result.update(lastWindows=visible, lastProcesses=list(procs.values()), unidentifiedTestUidPids=sorted(unidentified))
     renderers = [p for p in procs.values() if '--type=renderer' in p['argv']]
     if visible and renderers:
         signature = (tuple(sorted((w['window'], w['pid']) for w in visible)), tuple(sorted(p['pid'] for p in renderers)))
@@ -307,7 +395,7 @@ while time.monotonic() < deadline:
         previous_signature = signature
         observations.append({'seconds': round(time.monotonic() - first, 2), 'windows': visible, 'processes': list(procs.values())})
         if time.monotonic() - first >= 8:
-            pathlib.Path('startup-evidence.json').write_text(json.dumps({'status': 'PASS', 'observationSeconds': round(time.monotonic() - first, 2), 'observations': observations, 'claim': 'Visible offline X11 window owned by the unchanged Snap executable; renderer present; observed app processes use enforcing Snap AppArmor and seccomp2. No functional, secure-store or complete Electron internal-sandbox claim.'}, indent=2))
+            result = {'status': 'PASS', 'observationSeconds': round(time.monotonic() - first, 2), 'observations': observations, 'claim': 'Visible offline X11 window owned by the unchanged Snap executable; renderer present; observed app processes use enforcing Snap AppArmor and seccomp2. No functional, secure-store or complete Electron internal-sandbox claim.'}
             break
     else:
         first = None
@@ -315,10 +403,9 @@ while time.monotonic() < deadline:
         previous_signature = None
     time.sleep(2)
 else:
-    pathlib.Path('startup-evidence.json').write_text(json.dumps({'status': 'FAIL', 'failureClassification': 'STARTUP_NOT_ESTABLISHED', 'reason': 'No sustained visible application window with renderer and required process confinement within 65 seconds'}, indent=2))
+    result.update(status='FAIL', failureClassification='STARTUP_NOT_ESTABLISHED', reason='No sustained visible application window with renderer and required process confinement within 65 seconds; inspect retained partial observations')
     raise SystemExit(1)
 PY
-SESSION
 chmod 0644 "$evidence/session.sh"
 # The dedicated user cannot traverse the runner's private workspace. Place only
 # this harness script in its new home; keep it root-owned and read-only.
@@ -332,14 +419,21 @@ set +e
   sudo -u "$test_user" env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
     timeout --signal=TERM --kill-after=10s 125s systemd-run --user --wait --pipe --collect --property=Type=exec --property=RuntimeMaxSec=115s --unit=ht-snap-smoke \
     env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
-    timeout --signal=TERM --kill-after=10s 100s xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' bash "$test_home/session.sh"
-)
+    timeout --signal=TERM --kill-after=10s 100s xvfb-run -a -f "$test_home/.Xauthority-smoke" -s '-screen 0 1280x800x24 -nolisten tcp' bash "$test_home/session.sh"
+) > "$evidence/session-client.log" 2>&1 &
+session_client_pid=$!
+# The observer reads process metadata as host root; the app and X11 clients
+# remain the unprivileged test UID. No sudo capability is granted to that UID.
+sudo timeout --signal=TERM --kill-after=5s 90s python3 "$evidence/observer.py" "$test_uid" "$test_home" "$evidence" > "$evidence/observer.log" 2>&1
+observer_rc=$?
+wait "$session_client_pid"
 session_rc=$?
 set -e
 # Copy only explicit text evidence before deleting the dedicated test account.
-for name in application.log openbox.log window-manager.txt session-cgroup.txt startup-evidence.json; do
+for name in application.log openbox.log window-manager.txt session-cgroup.txt x11-session.json; do
   if sudo test -f "$test_home/evidence/$name"; then sudo cat "$test_home/evidence/$name" > "$evidence/$name"; fi
 done
+[[ "$observer_rc" == 0 ]] || { echo "Host observation failed with exit $observer_rc; inspect observer.log and startup-evidence.json"; exit 1; }
 [[ "$session_rc" == 0 ]] || { echo "Bounded session failed with exit $session_rc; timeout is not PASS"; exit 1; }
 python3 - "$evidence/startup-evidence.json" <<'PY'
 import json, sys
