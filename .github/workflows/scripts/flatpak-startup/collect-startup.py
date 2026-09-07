@@ -1,5 +1,7 @@
 """Host-root read-only observer. Never enters the Flatpak or changes confinement."""
 import configparser
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -38,20 +40,46 @@ fatal = re.compile(r'FATAL:|No usable sandbox|error while loading shared librari
 def xquery(*args):
     return subprocess.run(['runuser', '-u', USER, '--', 'env', '-i', *user_env, *args], capture_output=True, text=True, timeout=3)
 
-def read_info(path):
+def read_info(path, outer_instance):
+    # Retain the source text before parsing or validating any field. The file
+    # names come only from our own numeric /proc/instance paths and its digest.
+    raw = path.read_bytes()
+    source = ('pid-' + path.parts[2]) if path.parts[1] == 'proc' else ('instance-' + path.parent.name)
+    require(re.fullmatch(r'(pid|instance)-[0-9]+', source) is not None, f'Unexpected metadata source: {path}')
+    digest = hashlib.sha256(raw).hexdigest()[:16]
+    (output / f'flatpak-info-{source}-{digest}.txt').write_bytes(raw)
     cfg = configparser.ConfigParser(interpolation=None, strict=False)
-    cfg.read_string(path.read_text())
-    require(cfg.get('Application', 'name', fallback='') == APP, 'Running sandbox application identity mismatch')
-    require(cfg.get('Application', 'runtime', fallback='') == 'org.freedesktop.Platform/x86_64/25.08', 'Unexpected runtime')
-    context = {key: {item for item in value.split(';') if item} for key, value in cfg.items('Context')}
+    cfg.read_string(raw.decode('utf-8'))
+    observed_app = cfg.get('Application', 'name', fallback='')
+    observed_runtime = cfg.get('Application', 'runtime', fallback='')
+    observed_instance = cfg.get('Instance', 'instance-id', fallback='')
+    observed_path = cfg.get('Instance', 'app-path', fallback='')
+    # Live .flatpak-info uses a typed ref (runtime/ID/ARCH/BRANCH), unlike
+    # installed metadata's ID/ARCH/BRANCH. Compare the full canonical ref.
+    require(observed_app == APP, f'{source}: Application.name={observed_app!r}, expected {APP!r}')
+    expected_runtime = 'runtime/org.freedesktop.Platform/x86_64/25.08'
+    require(observed_runtime == expected_runtime, f'{source}: Application.runtime={observed_runtime!r}, expected {expected_runtime!r}')
+    require(observed_instance.isdecimal(), f'{source}: Instance.instance-id={observed_instance!r} is not numeric')
+    items = cfg.items('Context') if cfg.has_section('Context') else []
+    context = {key: {item for item in value.split(';') if item} for key, value in items}
     context = {key: values for key, values in context.items() if values}
     expected = {'shared': {'ipc'}, 'sockets': {'pulseaudio', 'x11'}, 'devices': {'dri'}}
-    require(context == expected, 'Effective permissions differ from qualified IPC/X11/PulseAudio/DRI with network removed')
-    require(not any(cfg.items(section) for section in cfg.sections() if section.endswith('Bus Policy')), 'Unexpected effective bus policy')
-    require(Path(cfg.get('Instance', 'app-path', fallback='')).resolve() == installed / 'files', 'Running instance app-path differs from verified installation')
+    observed_context = {key: sorted(values) for key, values in context.items()}
+    if observed_instance == outer_instance:
+        require(context == expected, f'{source}: outer Context={observed_context!r}, expected qualified IPC/X11/PulseAudio/DRI without network')
+    else:
+        # Zypak Spawn creates another tighter Flatpak sandbox, not a copy of
+        # the parent's instance ID and full graphical permissions. Namespace
+        # ancestry below must independently bind a renderer to the outer app.
+        observed_sandbox = cfg.get('Instance', 'sandbox', fallback='')
+        require(observed_sandbox == 'true', f'{source}: child Instance.sandbox={observed_sandbox!r}, expected true')
+        require(all(key in expected and values <= expected[key] for key, values in context.items()), f'{source}: child Context={observed_context!r} exceeds the offline parent permissions')
+    policies = {section: dict(cfg.items(section)) for section in cfg.sections() if section.endswith('Bus Policy') and cfg.items(section)}
+    require(not policies, f'{source}: unexpected explicit bus policy={policies!r}')
+    require(bool(observed_path) and Path(observed_path).resolve() == installed / 'files', f'{source}: Instance.app-path={observed_path!r}, expected {str(installed / "files")!r}')
     return cfg
 
-def processes():
+def processes(outer_instance):
     found = {}
     for path in Path('/proc').iterdir():
         if not path.name.isdecimal():
@@ -66,16 +94,40 @@ def processes():
             stat = (path / 'exe').stat()
             if (stat.st_dev, stat.st_ino) != exe_identity:
                 continue
-            cfg = read_info(path / 'root/.flatpak-info')
+            cfg = read_info(path / 'root/.flatpak-info', outer_instance)
             ns = {key: os.readlink(path / 'ns' / key) for key in host_ns}
             require(all(ns[key] != host_ns[key] for key in ns), 'Expected distinct Flatpak PID/mount/offline network namespaces')
             argv = (path / 'cmdline').read_bytes().decode(errors='replace').rstrip('\0').split('\0')
             # Zypak's normal argv is recorded, not reinterpreted as Chromium's
             # native sandbox. No flags are introduced or removed by this test.
-            found[int(path.name)] = {'pid': int(path.name), 'namespacePids': [int(v) for v in status.get('NSpid', '').split()], 'argv': argv, 'namespaces': ns, 'instanceId': cfg.get('Instance', 'instance-id', fallback=''), 'application': APP}
+            found[int(path.name)] = {'pid': int(path.name), 'namespacePids': [int(v) for v in status.get('NSpid', '').split()], 'argv': argv, 'namespaces': ns, 'instanceId': cfg.get('Instance', 'instance-id', fallback=''), 'sandbox': cfg.get('Instance', 'sandbox', fallback='false'), 'application': APP}
         except (FileNotFoundError, ProcessLookupError):
             continue
     return found
+
+def renderer_ancestry(proc, parent_namespaces):
+    # Linux nsfs NS_GET_PARENT = _IO(0xb7, 0x2): read-only descriptor query,
+    # never setns(). Bound traversal and close every returned descriptor.
+    fd = os.open(f'/proc/{proc["pid"]}/ns/pid', os.O_RDONLY | os.O_CLOEXEC)
+    chain = []
+    try:
+        current = os.readlink(f'/proc/self/fd/{fd}')
+        chain.append(current)
+        require(current not in parent_namespaces, f'Renderer PID {proc["pid"]} shares the outer PID namespace; this collector has no observed share-pids-mode proof')
+        for _ in range(8):
+            try:
+                parent_fd = fcntl.ioctl(fd, 0xb702)
+            except OSError as error:
+                raise RuntimeError(f'Renderer PID {proc["pid"]} namespace ancestry unverified: NS_GET_PARENT {error}; chain={chain!r}') from error
+            os.close(fd)
+            fd = parent_fd
+            parent = os.readlink(f'/proc/self/fd/{fd}')
+            chain.append(parent)
+            if parent in parent_namespaces:
+                return chain
+        raise RuntimeError(f'Renderer PID {proc["pid"]} not proven below outer PID namespace within eight levels: {chain!r}')
+    finally:
+        os.close(fd)
 
 def observe():
     deadline = time.monotonic() + 85
@@ -94,13 +146,23 @@ def observe():
         require(instance_id.isdecimal(), 'Unexpected Flatpak instance ID')
         instance_info = Path(f'/run/user/{uid}/.flatpak/{instance_id}/info')
         try:
-            read_info(instance_info)
-            procs = processes()
+            read_info(instance_info, instance_id)
+            procs = processes(instance_id)
         except FileNotFoundError:
             time.sleep(0.5)
             continue
         main = {pid: proc for pid, proc in procs.items() if not any(a.startswith('--type=') for a in proc['argv']) and proc['instanceId'] == instance_id}
-        renderers = [p for p in procs.values() if '--type=renderer' in p['argv'] and p['instanceId'] == instance_id]
+        parent_namespaces = {p['namespaces']['pid'] for p in main.values()}
+        renderers = []
+        if parent_namespaces:
+            for proc in procs.values():
+                if '--type=renderer' not in proc['argv']:
+                    continue
+                try:
+                    proc['outerPidNamespaceAncestry'] = renderer_ancestry(proc, parent_namespaces)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                renderers.append(proc)
         listing = xquery('wmctrl', '-lp')
         visible = []
         if listing.returncode == 0:
