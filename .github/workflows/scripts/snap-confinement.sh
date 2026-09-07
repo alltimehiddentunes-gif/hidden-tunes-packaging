@@ -32,6 +32,9 @@ cleanup() {
   local mounts=''
   local uid_quiescent=yes
   local unit_state=''
+  local unit_details=''
+  local manager_details=''
+  local runtime_details=''
   local process_probe_rc=0
   local command_log="$evidence/cleanup-commands.log"
   if [[ "$user_created" == yes ]]; then
@@ -57,10 +60,28 @@ cleanup() {
     printf 'UID=%s\nprocessProbeExit=%s (1 means no matches)\n' "$test_uid" "$process_probe_rc" > "$evidence/cleanup-final-state.txt"
     if [[ "$process_probe_rc" != 1 ]]; then failed=1; uid_quiescent=no; fi
     if [[ "$systemd_session_attempted" == yes ]]; then
+      # Preserve terminal failure details before resetting only this new UID's
+      # stopped manager. reset-failed clears bookkeeping; it does not stop it.
       for unit in "user@$test_uid.service" "user-runtime-dir@$test_uid.service"; do
-        if unit_state="$(systemctl show "$unit" --property=ActiveState --value 2>> "$command_log")"; then
-          printf '%s=%s\n' "$unit" "$unit_state" >> "$evidence/cleanup-final-state.txt"
-          if [[ "$unit_state" != inactive ]]; then failed=1; uid_quiescent=no; fi
+        if unit_details="$(systemctl show "$unit" --property=ActiveState --property=SubState --property=MainPID --property=ControlPID --property=Result --property=ExecMainCode --property=ExecMainStatus 2>> "$command_log")"; then
+          printf '[%s]\n%s\n' "$unit" "$unit_details" >> "$evidence/cleanup-unit-state-before-reset.txt"
+          if [[ "$unit" == "user@$test_uid.service" ]]; then manager_details="$unit_details"; else runtime_details="$unit_details"; fi
+        else
+          printf '[%s]\nUNVERIFIED\n' "$unit" >> "$evidence/cleanup-unit-state-before-reset.txt"
+          failed=1; uid_quiescent=no
+        fi
+      done
+      if [[ "$process_probe_rc" == 1 ]] &&
+        grep -qx 'ActiveState=failed' <<< "$manager_details" && grep -qx 'SubState=failed' <<< "$manager_details" &&
+        grep -qx 'MainPID=0' <<< "$manager_details" && grep -qx 'ControlPID=0' <<< "$manager_details" &&
+        grep -qx 'ActiveState=inactive' <<< "$runtime_details" && grep -qx 'MainPID=0' <<< "$runtime_details" && grep -qx 'ControlPID=0' <<< "$runtime_details" &&
+        sudo test ! -e "/var/lib/systemd/linger/$test_user" && sudo test ! -L "/var/lib/systemd/linger/$test_user"; then
+        sudo timeout --signal=TERM --kill-after=2s 5s systemctl reset-failed "user@$test_uid.service" >> "$command_log" 2>&1 || { printf 'Scoped reset-failed exit %s\n' "$?" >> "$command_log"; failed=1; }
+      fi
+      for unit in "user@$test_uid.service" "user-runtime-dir@$test_uid.service"; do
+        if unit_details="$(systemctl show "$unit" --property=ActiveState --property=SubState --property=MainPID --property=ControlPID 2>> "$command_log")"; then
+          printf '[%s]\n%s\n' "$unit" "$unit_details" >> "$evidence/cleanup-final-state.txt"
+          if ! { grep -qx 'ActiveState=inactive' <<< "$unit_details" && grep -qx 'MainPID=0' <<< "$unit_details" && grep -qx 'ControlPID=0' <<< "$unit_details"; }; then failed=1; uid_quiescent=no; fi
         else
           printf '%s=UNVERIFIED\n' "$unit" >> "$evidence/cleanup-final-state.txt"
           failed=1; uid_quiescent=no
@@ -73,6 +94,10 @@ cleanup() {
         failed=1; uid_quiescent=no
       fi
     fi
+    pgrep -u "$test_uid" > "$evidence/cleanup-remaining-pids.txt" 2>> "$command_log"
+    process_probe_rc=$?
+    printf 'finalProcessProbeExit=%s (1 means no matches)\n' "$process_probe_rc" >> "$evidence/cleanup-final-state.txt"
+    if [[ "$process_probe_rc" != 1 ]]; then failed=1; uid_quiescent=no; fi
   fi
   if [[ "$uid_quiescent" == yes ]]; then
     if [[ "$firewall4" == yes ]]; then sudo iptables -D OUTPUT -m owner --uid-owner "$test_uid" -m comment --comment ht-snap-smoke -j REJECT || failed=1; fi
@@ -239,8 +264,12 @@ wmctrl -m > window-manager.txt
 /snap/bin/hiddentunes > application.log 2>&1 &
 app_pid=$!
 python3 - "$app_pid" <<'PY'
-import json, os, pathlib, sys
-state = {'uid': os.getuid(), 'display': os.environ['DISPLAY'], 'xauthority': os.environ['XAUTHORITY'], 'launcherPid': int(sys.argv[1])}
+import json, os, pathlib, stat, sys
+authority = pathlib.Path(os.environ['XAUTHORITY'])
+info = authority.lstat()
+if authority != pathlib.Path('/run/user') / str(os.getuid()) / '.Xauthority' or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size == 0:
+    raise SystemExit('Expected private authenticated runtime Xauthority file')
+state = {'uid': os.getuid(), 'display': os.environ['DISPLAY'], 'xauthority': str(authority), 'launcherPid': int(sys.argv[1]), 'xauthorityMetadata': {'uid': info.st_uid, 'mode': oct(stat.S_IMODE(info.st_mode)), 'bytes': info.st_size, 'kind': 'regular-file'}}
 pathlib.Path('x11-session.tmp').write_text(json.dumps(state))
 os.replace('x11-session.tmp', 'x11-session.json')
 PY
@@ -296,11 +325,11 @@ while True:
 display = session.get('display', '')
 authority = pathlib.Path(session.get('xauthority', ''))
 launcher_pid = session.get('launcherPid')
-if session.get('uid') != uid or not re.fullmatch(r':[0-9]+(?:\.[0-9]+)?', display) or authority != home / '.Xauthority-smoke' or type(launcher_pid) is not int or launcher_pid <= 0:
+if session.get('uid') != uid or not re.fullmatch(r':[0-9]+(?:\.[0-9]+)?', display) or authority != pathlib.Path('/run/user') / str(uid) / '.Xauthority' or type(launcher_pid) is not int or launcher_pid <= 0:
     raise RuntimeError('Invalid observed X11 session metadata')
 auth_info = authority.lstat()
-if not stat.S_ISREG(auth_info.st_mode) or auth_info.st_uid != uid:
-    raise RuntimeError('Xauthority is not a regular file owned by the test UID')
+if not stat.S_ISREG(auth_info.st_mode) or auth_info.st_uid != uid or stat.S_IMODE(auth_info.st_mode) != 0o600 or auth_info.st_size == 0:
+    raise RuntimeError('Xauthority is not a private nonempty regular file owned by the test UID')
 
 def x11_query(args):
     # X11 reads run as the fresh UID with exactly the observed display/cookie.
@@ -337,7 +366,17 @@ def processes():
             profile = (path / 'attr/current').read_text().strip()
             if profile != 'snap.hiddentunes.hiddentunes (enforce)' or status.get('Seccomp', '').strip() != '2':
                 raise RuntimeError('Application process is not under required enforcing Snap profile/seccomp filter')
-            found[int(path.name)] = {'pid': int(path.name), 'exe': exe, 'argv': argv, 'apparmor': profile, 'seccomp': status['Seccomp'].strip(), 'noNewPrivs': status.get('NoNewPrivs', '').strip()}
+            # Retain only display/cookie paths from this verified fresh-user
+            # executable, never cookie contents or the rest of its environment.
+            x11_environment = {}
+            x11_diagnostic = 'available'
+            try:
+                with (path / 'environ').open('rb') as stream:
+                    environment = stream.read(131072).decode(errors='replace').split('\0')
+                x11_environment = dict(item.split('=', 1) for item in environment if item.startswith(('DISPLAY=', 'XAUTHORITY=')))
+            except PermissionError:
+                x11_diagnostic = 'unavailable: optional environment metadata permission denied'
+            found[int(path.name)] = {'pid': int(path.name), 'exe': exe, 'argv': argv, 'apparmor': profile, 'seccomp': status['Seccomp'].strip(), 'noNewPrivs': status.get('NoNewPrivs', '').strip(), 'x11Environment': x11_environment, 'x11EnvironmentDiagnostic': x11_diagnostic}
         except (FileNotFoundError, ProcessLookupError):
             continue
         except PermissionError as error:
@@ -411,15 +450,18 @@ chmod 0644 "$evidence/session.sh"
 # this harness script in its new home; keep it root-owned and read-only.
 sudo install -o root -g root -m 0444 "$evidence/session.sh" "$test_home/session.sh"
 stage=offline_startup
+startup_since="$(date --utc '+%Y-%m-%d %H:%M:%S UTC')"
+# Read only the current installed profile's cookie-path rules for diagnosis.
+sudo grep -F '.Xauthority' /var/lib/snapd/apparmor/profiles/snap.hiddentunes.hiddentunes > "$evidence/xauthority-profile-rules.txt" || echo 'Cookie-path profile diagnostic unavailable' > "$evidence/xauthority-profile-diagnostic.txt"
 set +e
 (
   cd /
   # A user service is forked by the user manager directly into its hierarchy;
   # do not depend on moving a sudo child from the hosted-agent system cgroup.
   sudo -u "$test_user" env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
-    timeout --signal=TERM --kill-after=10s 125s systemd-run --user --wait --pipe --collect --property=Type=exec --property=RuntimeMaxSec=115s --unit=ht-snap-smoke \
+    timeout --signal=TERM --kill-after=10s 125s systemd-run --user --wait --pipe --collect --property=Type=exec --property=RuntimeMaxSec=115s --property=UMask=0077 --unit=ht-snap-smoke \
     env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
-    timeout --signal=TERM --kill-after=10s 100s xvfb-run -a -f "$test_home/.Xauthority-smoke" -s '-screen 0 1280x800x24 -nolisten tcp' bash "$test_home/session.sh"
+    timeout --signal=TERM --kill-after=10s 100s xvfb-run -a -f "$runtime_dir/.Xauthority" -s '-screen 0 1280x800x24 -nolisten tcp' bash "$test_home/session.sh"
 ) > "$evidence/session-client.log" 2>&1 &
 session_client_pid=$!
 # The observer reads process metadata as host root; the app and X11 clients
@@ -433,6 +475,13 @@ set -e
 for name in application.log openbox.log window-manager.txt session-cgroup.txt x11-session.json; do
   if sudo test -f "$test_home/evidence/$name"; then sudo cat "$test_home/evidence/$name" > "$evidence/$name"; fi
 done
+# Capture only this app's exact enforcing-profile denial lines during launch;
+# an unavailable journal is recorded, never presented as absence of denials.
+if sudo journalctl --kernel --since "$startup_since" --no-pager --output=short-precise | awk '/apparmor="DENIED"/ && /profile="snap\.hiddentunes\.hiddentunes"/' > "$evidence/apparmor-app-denials.txt"; then
+  echo 'Kernel journal query completed; filtered exact application profile' > "$evidence/apparmor-diagnostic-status.txt"
+else
+  echo 'Kernel journal diagnostic unavailable or incomplete' > "$evidence/apparmor-diagnostic-status.txt"
+fi
 [[ "$observer_rc" == 0 ]] || { echo "Host observation failed with exit $observer_rc; inspect observer.log and startup-evidence.json"; exit 1; }
 [[ "$session_rc" == 0 ]] || { echo "Bounded session failed with exit $session_rc; timeout is not PASS"; exit 1; }
 python3 - "$evidence/startup-evidence.json" <<'PY'
