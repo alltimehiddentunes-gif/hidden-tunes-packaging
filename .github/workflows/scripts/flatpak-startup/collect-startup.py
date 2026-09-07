@@ -21,7 +21,10 @@ def require(condition, message):
 require(os.geteuid() == 0, 'Host root is required for read-only process inspection')
 require(os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('HT_RUNNER_ENVIRONMENT') == 'github-hosted', 'Disposable hosted runner required')
 require(os.environ.get('GITHUB_REPOSITORY') == 'alltimehiddentunes-gif/hidden-tunes-packaging', 'Unexpected repository')
-uid, installed_arg, output_arg = sys.argv[1:]
+require(len(sys.argv) in (4, 5), 'Unexpected observer arguments')
+uid, installed_arg, output_arg = sys.argv[1:4]
+mode = sys.argv[4] if len(sys.argv) == 5 else 'observe'
+require(mode in ('observe', 'final-diagnostics'), 'Unexpected observer mode')
 require(uid.isdecimal() and int(uid) >= 1000, 'Invalid fresh UID')
 uid = int(uid)
 import pwd
@@ -36,6 +39,121 @@ exe_identity = (original.st_dev, original.st_ino)
 host_ns = {key: os.readlink(f'/proc/self/ns/{key}') for key in ('pid', 'mnt', 'net')}
 user_env = [f'HOME={HOME}', f'USER={USER}', f'LOGNAME={USER}', 'PATH=/usr/bin:/bin', 'DISPLAY=:97', f'XAUTHORITY={HOME}/.Xauthority', f'XDG_RUNTIME_DIR=/run/user/{uid}', f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus']
 fatal = re.compile(r'FATAL:|No usable sandbox|error while loading shared libraries|Missing X server|Failed to move to new namespace', re.I)
+
+def timestamp():
+    return {'unixSeconds': time.time(), 'monotonicSeconds': time.monotonic()}
+
+def timeline(event, **details):
+    with (output / 'observation-timeline.jsonl').open('a') as stream:
+        stream.write(json.dumps({**timestamp(), 'event': event, **details}) + '\n')
+
+def process_type(argv):
+    # Chromium can rewrite /proc/cmdline into one space-separated argument.
+    # Match complete ASCII-whitespace/NUL-delimited flags, never substrings.
+    joined = '\0'.join(argv)
+    flags = re.findall(r'(?:^|[\x00\t\n\v\f\r ])--type(?:=([^\x00\t\n\v\f\r ]*))?(?=$|[\x00\t\n\v\f\r ])', joined)
+    require(len(flags) <= 1 and all(flags), f'Ambiguous or empty Chromium --type flags: {flags!r}')
+    return flags[0] if flags else None
+
+diagnostic_seen = set()
+diagnostic_records = 0
+diagnostic_bytes = 0
+diagnostic_capped = False
+
+def process_diagnostics():
+    # Supplementary observations only: helpers never satisfy the app gate.
+    global diagnostic_records, diagnostic_bytes, diagnostic_capped
+    if diagnostic_capped:
+        return
+    for path in Path('/proc').iterdir():
+        if not path.name.isdecimal():
+            continue
+        try:
+            status = dict(line.split(':', 1) for line in (path / 'status').read_text().splitlines() if ':' in line)
+            if int(status.get('Uid', '-1').split()[0]) != uid:
+                continue
+            record = {'pid': int(path.name), 'realUid': uid, 'ppid': status.get('PPid', '').strip(), 'comm': status.get('Name', '').strip(), 'expectedExecutable': {'device': exe_identity[0], 'inode': exe_identity[1]}}
+            try:
+                record['startTicks'] = (path / 'stat').read_text().rsplit(')', 1)[1].split()[19]
+                stat = (path / 'exe').stat()
+                record['executable'] = {'path': os.readlink(path / 'exe'), 'device': stat.st_dev, 'inode': stat.st_ino}
+                record['matchesOriginalExecutable'] = (stat.st_dev, stat.st_ino) == exe_identity
+                with (path / 'cmdline').open('rb') as stream:
+                    raw = stream.read(8193)
+                record['argv'] = raw[:8192].decode(errors='replace').rstrip('\0').split('\0')
+                record['argvTruncated'] = len(raw) > 8192
+                info_path = path / 'root/.flatpak-info'
+                if info_path.exists():
+                    with info_path.open('rb') as stream:
+                        info = stream.read(32769)
+                    if len(info) > 32768:
+                        record['flatpakInfoError'] = 'Metadata exceeds diagnostic size limit'
+                    else:
+                        cfg = configparser.ConfigParser(interpolation=None, strict=False)
+                        cfg.read_string(info.decode('utf-8'))
+                        record['flatpak'] = {'application': cfg.get('Application', 'name', fallback=''), 'runtime': cfg.get('Application', 'runtime', fallback=''), 'instanceId': cfg.get('Instance', 'instance-id', fallback='')}
+            except (OSError, ValueError, configparser.Error, UnicodeError, IndexError) as error:
+                record['inspectionError'] = str(error)[:512]
+            key = json.dumps(record, sort_keys=True)
+            if key in diagnostic_seen:
+                continue
+            line = json.dumps({**timestamp(), **record}) + '\n'
+            length = len(line.encode())
+            if diagnostic_records >= 512 or diagnostic_bytes + length > 1048576:
+                diagnostic_capped = True
+                timeline('process-diagnostics-capped', records=diagnostic_records, bytes=diagnostic_bytes)
+                return
+            diagnostic_seen.add(key)
+            with (output / 'process-diagnostics.jsonl').open('a') as stream:
+                stream.write(line)
+            diagnostic_records += 1
+            diagnostic_bytes += length
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+
+def log_diagnostics():
+    log = HOME / 'evidence/application.log'
+    state_path = output / 'log-observation-state.json'
+    state = json.loads(state_path.read_text()) if state_path.exists() else {'offset': 0, 'capturedBytes': 0, 'assertionSeen': False}
+    try:
+        with log.open('rb') as stream:
+            stream.seek(state['offset'])
+            raw = stream.read(min(65536 - state['capturedBytes'], 8192))
+        if not raw:
+            return
+        text = raw.decode(errors='replace')
+        timeline('application-log-first-observed', phase=mode, offset=state['offset'], text=text)
+        # Keep a short carry-over so a line split at the read cap is recognized.
+        combined = state.get('tail', '') + text
+        if not state['assertionSeen'] and 'event_origin_changed' in combined:
+            timeline('assertion-first-observed', phase=mode, timingLimit='Sampling time only; emission can precede this observation')
+            state['assertionSeen'] = True
+        state.update(offset=state['offset'] + len(raw), capturedBytes=state['capturedBytes'] + len(raw), tail=combined[-256:])
+        state_path.write_text(json.dumps(state))
+        if state['capturedBytes'] >= 65536:
+            timeline('application-log-diagnostics-capped', bytes=state['capturedBytes'])
+    except FileNotFoundError:
+        pass
+
+def final_diagnostics():
+    # Existing metadata only. Never enable/change crash handling or read cores.
+    log_diagnostics()
+    events = [json.loads(line) for line in (output / 'observation-timeline.jsonl').read_text().splitlines()]
+    start = next(event['unixSeconds'] for event in events if event['event'] == 'session-launch-requested')
+    allowed = {'__REALTIME_TIMESTAMP', '__MONOTONIC_TIMESTAMP', 'COREDUMP_UID', 'COREDUMP_PID', 'COREDUMP_COMM', 'COREDUMP_EXE', 'COREDUMP_SIGNAL', 'COREDUMP_SIGNAL_NAME'}
+    try:
+        query = subprocess.run(['journalctl', '--boot', '--no-pager', '--quiet', '--lines=32', f'--since=@{int(start)}', f'--until=@{int(time.time()) + 1}', f'COREDUMP_UID={uid}', '--output=json', '--output-fields=' + ','.join(sorted(allowed))], capture_output=True, text=True, timeout=5)
+        records = []
+        for line in query.stdout.splitlines()[:32]:
+            record = json.loads(line)
+            if str(record.get('COREDUMP_UID', '')) == str(uid):
+                records.append({key: str(value)[:2048] for key, value in record.items() if key in allowed})
+        status = 'PRESENT' if query.returncode == 0 and records else 'UNAVAILABLE_OR_NO_MATCH'
+        result = {'status': status, 'returncode': query.returncode, 'records': records, 'stderr': query.stderr[:512], 'limit': 'Existing journal metadata only; absence does not prove no crash occurred; fields and string lengths capped'}
+    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        result = {'status': 'UNAVAILABLE', 'reason': str(error)[:512]}
+    (output / 'crash-journal-metadata.json').write_text(json.dumps(result, indent=2) + '\n')
+    timeline('final-diagnostics-complete')
 
 def xquery(*args):
     return subprocess.run(['runuser', '-u', USER, '--', 'env', '-i', *user_env, *args], capture_output=True, text=True, timeout=3)
@@ -100,7 +218,7 @@ def processes(outer_instance):
             argv = (path / 'cmdline').read_bytes().decode(errors='replace').rstrip('\0').split('\0')
             # Zypak's normal argv is recorded, not reinterpreted as Chromium's
             # native sandbox. No flags are introduced or removed by this test.
-            found[int(path.name)] = {'pid': int(path.name), 'namespacePids': [int(v) for v in status.get('NSpid', '').split()], 'argv': argv, 'namespaces': ns, 'instanceId': cfg.get('Instance', 'instance-id', fallback=''), 'sandbox': cfg.get('Instance', 'sandbox', fallback='false'), 'application': APP}
+            found[int(path.name)] = {'pid': int(path.name), 'namespacePids': [int(v) for v in status.get('NSpid', '').split()], 'argv': argv, 'processType': process_type(argv), 'namespaces': ns, 'instanceId': cfg.get('Instance', 'instance-id', fallback=''), 'sandbox': cfg.get('Instance', 'sandbox', fallback='false'), 'application': APP}
         except (FileNotFoundError, ProcessLookupError):
             continue
     return found
@@ -135,6 +253,8 @@ def observe():
     since = None
     observations = []
     while time.monotonic() < deadline:
+        process_diagnostics()
+        log_diagnostics()
         log = HOME / 'evidence/application.log'
         if log.exists():
             require(not fatal.search(log.read_text(errors='replace')), 'Fatal startup diagnostic; inspect application.log')
@@ -151,12 +271,12 @@ def observe():
         except FileNotFoundError:
             time.sleep(0.5)
             continue
-        main = {pid: proc for pid, proc in procs.items() if not any(a.startswith('--type=') for a in proc['argv']) and proc['instanceId'] == instance_id}
+        main = {pid: proc for pid, proc in procs.items() if proc['processType'] is None and proc['instanceId'] == instance_id}
         parent_namespaces = {p['namespaces']['pid'] for p in main.values()}
         renderers = []
         if parent_namespaces:
             for proc in procs.values():
-                if '--type=renderer' not in proc['argv']:
+                if proc['processType'] != 'renderer':
                     continue
                 try:
                     proc['outerPidNamespaceAncestry'] = renderer_ancestry(proc, parent_namespaces)
@@ -191,12 +311,18 @@ def observe():
                 return {'status': 'PASS', 'observationSeconds': round(time.monotonic() - since, 2), 'observations': observations, 'claim': 'Offline visible X11 window mapped through namespace PID to the original installed executable; renderer present; effective Flatpak app/runtime identity and distinct PID/mount/network namespaces observed. No functional, portal, secure-store or complete Chromium/Zypak sandbox qualification.'}
         else:
             signature, since, observations = None, None, []
-        time.sleep(2)
+        time.sleep(0.25)
     raise RuntimeError('No sustained owned visible application window and renderer within 85 seconds')
 
+if mode == 'final-diagnostics':
+    final_diagnostics()
+    sys.exit(0)
+
+timeline('observer-start', samplingLimit='Process diagnostics sampled between checks; transient processes may be missed')
 try:
     result = observe()
 except Exception as error:
     result = {'status': 'FAIL', 'reason': str(error), 'classification': 'UNRESOLVED_STARTUP_OR_FIXTURE_FAILURE', 'claim': 'Failure is not proof of application incompatibility; inspect text evidence.'}
 (output / 'startup-result.json').write_text(json.dumps(result, indent=2) + '\n')
+timeline('observer-result', status=result['status'], reason=result.get('reason', ''))
 sys.exit(0 if result['status'] == 'PASS' else 1)

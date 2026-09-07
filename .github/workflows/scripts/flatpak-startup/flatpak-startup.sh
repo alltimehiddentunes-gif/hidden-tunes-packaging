@@ -180,6 +180,15 @@ as_test systemctl --user set-environment FLATPAK_SYSTEM_DIR="$system_dir"
 systemctl show "user@$test_uid.service" --property=ActiveState --property=MainPID --property=ControlGroup > "$evidence/user-manager.txt"
 stage=offline_startup
 startup_status=RUNNING
+stamp_observation() {
+  sudo python3 - "$evidence/observation-timeline.jsonl" "$@" <<'PY'
+import json, sys, time
+path, event, *details = sys.argv[1:]
+with open(path, 'a') as stream:
+    stream.write(json.dumps({'unixSeconds': time.time(), 'monotonicSeconds': time.monotonic(), 'event': event, 'details': details}) + '\n')
+PY
+}
+stamp_observation session-launch-requested
 (
   cd /
   as_test timeout --signal=TERM --kill-after=10s 140s systemd-run --user --wait --pipe --collect --property=Type=exec --property=RuntimeMaxSec=125s --unit=ht-flatpak-smoke \
@@ -191,9 +200,18 @@ set +e
 sudo env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin GITHUB_ACTIONS=true HT_RUNNER_ENVIRONMENT="$HT_RUNNER_ENVIRONMENT" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
   timeout --kill-after=5s 100s python3 "$scripts/collect-startup.py" "$test_uid" "$location" "$evidence"
 collector_rc=$?
+stamp_observation collector-client-return "$collector_rc"
+stamp_observation stop-marker-requested
 sudo touch "$test_home/evidence/stop"
+stop_rc=$?
+stamp_observation stop-marker-write-return "$stop_rc"
 wait "$client_pid"
 session_rc=$?
+stamp_observation session-client-return "$session_rc"
+sudo env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin GITHUB_ACTIONS=true HT_RUNNER_ENVIRONMENT="$HT_RUNNER_ENVIRONMENT" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+  timeout --kill-after=5s 10s python3 "$scripts/collect-startup.py" "$test_uid" "$location" "$evidence" final-diagnostics
+diagnostics_rc=$?
+stamp_observation optional-final-diagnostics-return "$diagnostics_rc"
 set -e
 for name in application.log xvfb.log openbox.log window-manager.txt session-cgroup.txt instance-id.txt; do
   if sudo test -f "$test_home/evidence/$name"; then sudo cat "$test_home/evidence/$name" > "$evidence/$name"; fi
