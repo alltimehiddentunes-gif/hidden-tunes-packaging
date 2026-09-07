@@ -19,6 +19,7 @@ exec > >(tee "$evidence/qualification.log") 2>&1
 installed=no
 user_created=no
 runtime_created=no
+systemd_session_attempted=no
 firewall4=no
 firewall6=no
 test_uid=''
@@ -33,6 +34,19 @@ cleanup() {
   if [[ "$user_created" == yes ]]; then
     # The UID was allocated only after refusing an existing account/home.
     if ! [[ "$(id -u "$test_user")" == "$test_uid" && "$test_uid" =~ ^[0-9]+$ && "$test_uid" -ge 1000 ]]; then return 1; fi
+    if [[ "$systemd_session_attempted" == yes ]]; then
+      # Stop the newly enabled manager before killing processes: otherwise it
+      # could respawn user services after the offline firewall is removed.
+      sudo loginctl disable-linger "$test_user" || { failed=1; uid_quiescent=no; }
+      if sudo loginctl show-user "$test_uid" --property=UID --value >/dev/null 2>&1; then
+        sudo timeout --signal=TERM --kill-after=5s 30s loginctl terminate-user "$test_uid" || { failed=1; uid_quiescent=no; }
+      fi
+      sudo timeout --signal=TERM --kill-after=5s 30s systemctl stop "user@$test_uid.service" "user-runtime-dir@$test_uid.service" || { failed=1; uid_quiescent=no; }
+      for unit in "user@$test_uid.service" "user-runtime-dir@$test_uid.service"; do
+        if [[ "$(systemctl show "$unit" --property=ActiveState --value)" != inactive ]]; then failed=1; uid_quiescent=no; fi
+      done
+      if [[ -e "/var/lib/systemd/linger/$test_user" || -L "/var/lib/systemd/linger/$test_user" ]]; then failed=1; uid_quiescent=no; fi
+    fi
     sudo pkill -TERM -u "$test_uid" || [[ "$?" == 1 ]] || failed=1
     sleep 2
     if pgrep -u "$test_uid" >/dev/null; then sudo pkill -KILL -u "$test_uid" || failed=1; sleep 1; fi
@@ -49,7 +63,7 @@ cleanup() {
     if snap list hiddentunes >/dev/null 2>&1 || [[ -e /snap/hiddentunes/current ]]; then failed=1; fi
     if find /var/lib/snapd/desktop/applications -maxdepth 1 -name 'hiddentunes_*.desktop' -type f | grep -q .; then failed=1; fi
   fi
-  if [[ "$runtime_created" == yes ]]; then
+  if [[ "$runtime_created" == yes && "$uid_quiescent" == yes ]]; then
     if [[ -e "$runtime_dir" || -L "$runtime_dir" ]]; then
       if [[ "$runtime_dir" == "/run/user/$test_uid" && ! -L "$runtime_dir" && "$(readlink -f "$runtime_dir")" == "$runtime_dir" && "$(stat -c %u "$runtime_dir")" == "$test_uid" ]] && ! pgrep -u "$test_uid" >/dev/null; then
         # This directory did not exist before the test. Refuse any mount at or
@@ -107,7 +121,7 @@ PY
 trap finalize EXIT
 
 sudo apt-get update
-sudo apt-get install -y squashfs-tools desktop-file-utils xvfb xauth openbox wmctrl x11-utils dbus-x11 iptables
+sudo apt-get install -y squashfs-tools desktop-file-utils xvfb xauth openbox wmctrl x11-utils dbus-x11 dbus-user-session iptables
 sudo snap install snapcraft --classic
 snap version > "$evidence/snap-version.txt"
 snapcraft --version > "$evidence/snapcraft-version.txt"
@@ -146,9 +160,9 @@ test_uid="$(id -u "$test_user")"
 [[ "$test_uid" =~ ^[0-9]+$ && "$test_uid" -ge 1000 ]]
 [[ "$(getent passwd "$test_user" | cut -d: -f6)" == "$test_home" && "$(readlink -f "$test_home")" == "$test_home" ]]
 runtime_dir="/run/user/$test_uid"
-[[ ! -e "$runtime_dir" ]]
-sudo install -d -m 0700 -o "$test_uid" -g "$(id -g "$test_user")" "$runtime_dir"
-runtime_created=yes
+[[ ! -e "$runtime_dir" && ! -L "$runtime_dir" ]]
+[[ ! -e "/var/lib/systemd/linger/$test_user" && ! -L "/var/lib/systemd/linger/$test_user" ]]
+if systemctl is-active --quiet "user@$test_uid.service"; then echo 'Refusing pre-existing user manager'; exit 2; fi
 sudo install -d -m 0700 -o "$test_uid" -g "$(id -g "$test_user")" "$test_home/evidence"
 # Defense in depth: no outbound IPv4/IPv6 for the unique test UID, even if
 # another connected Snap interface permits sockets. X11/DBus use Unix sockets.
@@ -160,11 +174,38 @@ sudo iptables -C OUTPUT -m owner --uid-owner "$test_uid" -m comment --comment ht
 sudo ip6tables -C OUTPUT -m owner --uid-owner "$test_uid" -m comment --comment ht-snap-smoke -j REJECT
 printf 'Temporary UID %s: outbound IPv4 and IPv6 REJECT; private Unix-socket X11/DBus; no credentials.\n' "$test_uid" > "$evidence/offline-isolation.txt"
 
+stage=systemd_user_session
+# The real user manager owns the session bus and can create Snap tracking
+# scopes. A separate dbus-run-session bus cannot provide that systemd service.
+runtime_created=yes
+systemd_session_attempted=yes
+sudo loginctl enable-linger "$test_user"
+sudo timeout --signal=TERM --kill-after=5s 30s systemctl start "user@$test_uid.service"
+systemctl is-active --quiet "user@$test_uid.service"
+[[ -d "$runtime_dir" && ! -L "$runtime_dir" && "$(readlink -f "$runtime_dir")" == "$runtime_dir" && "$(stat -c %u "$runtime_dir")" == "$test_uid" ]]
+systemctl show "user@$test_uid.service" --property=ActiveState --property=MainPID --property=ControlGroup > "$evidence/user-manager.txt"
+loginctl show-user "$test_uid" --property=UID --property=Linger --property=RuntimePath >> "$evidence/user-manager.txt"
+bus_ready=no
+bus_deadline=$((SECONDS + 10))
+while (( SECONDS < bus_deadline )); do
+  if [[ -S "$runtime_dir/bus" && "$(stat -c %u "$runtime_dir/bus")" == "$test_uid" ]] &&
+    sudo -u "$test_user" env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" timeout --signal=TERM --kill-after=1s 1s systemctl --user show --property=Version > "$evidence/user-manager-bus.txt" 2>&1 &&
+    grep -q '^Version=.' "$evidence/user-manager-bus.txt"; then
+    bus_ready=yes
+    break
+  fi
+  sleep 0.25
+done
+[[ "$bus_ready" == yes ]] || { echo 'Fixture failure: owned systemd user bus and manager were not ready within the bounded readiness window'; exit 1; }
+
 cat > "$evidence/session.sh" <<'SESSION'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$(id -un)" == ht-snap-smoke && "$HOME" == /home/ht-snap-smoke && -n "${DISPLAY:-}" && -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] || exit 2
 cd "$HOME/evidence"
+[[ "$DBUS_SESSION_BUS_ADDRESS" == "unix:path=/run/user/$(id -u)/bus" ]]
+cat "/proc/$$/cgroup" > session-cgroup.txt
+grep -Fq "/user.slice/user-$(id -u).slice/user@$(id -u).service/" session-cgroup.txt || { echo 'Harness did not enter the dedicated systemd user cgroup'; exit 2; }
 openbox --sm-disable > openbox.log 2>&1 &
 wm_pid=$!
 app_pid=''
@@ -264,12 +305,17 @@ stage=offline_startup
 set +e
 (
   cd /
-  sudo -u "$test_user" env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR="$runtime_dir" timeout --signal=TERM --kill-after=10s 100s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' bash "$test_home/session.sh"
+  # A user service is forked by the user manager directly into its hierarchy;
+  # do not depend on moving a sudo child from the hosted-agent system cgroup.
+  sudo -u "$test_user" env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+    timeout --signal=TERM --kill-after=10s 125s systemd-run --user --wait --pipe --collect --property=Type=exec --property=RuntimeMaxSec=115s --unit=ht-snap-smoke \
+    env -i HOME="$test_home" USER="$test_user" LOGNAME="$test_user" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+    timeout --signal=TERM --kill-after=10s 100s xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' bash "$test_home/session.sh"
 )
 session_rc=$?
 set -e
 # Copy only explicit text evidence before deleting the dedicated test account.
-for name in application.log openbox.log window-manager.txt startup-evidence.json; do
+for name in application.log openbox.log window-manager.txt session-cgroup.txt startup-evidence.json; do
   if sudo test -f "$test_home/evidence/$name"; then sudo cat "$test_home/evidence/$name" > "$evidence/$name"; fi
 done
 [[ "$session_rc" == 0 ]] || { echo "Bounded session failed with exit $session_rc; timeout is not PASS"; exit 1; }
