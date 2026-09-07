@@ -7,7 +7,7 @@ description: |
   The application is proprietary and is governed by the Desktop EULA:
   https://hiddentunes.com/legal/desktop-eula
 base: core24
-grade: devel
+grade: stable
 confinement: strict
 license: Proprietary
 website: https://hiddentunes.com

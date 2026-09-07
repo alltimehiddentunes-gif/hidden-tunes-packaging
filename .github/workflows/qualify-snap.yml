@@ -21,12 +21,90 @@ jobs:
           test "$HT_RUNNER_ENVIRONMENT" = github-hosted
           test "$GITHUB_REPOSITORY" = alltimehiddentunes-gif/hidden-tunes-packaging
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools desktop-file-utils
+          sudo apt-get install -y squashfs-tools desktop-file-utils python3-yaml
           sudo snap install snapcraft --classic
       - name: Build wrapper and check package registration
         env:
           HT_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: bash snap/scripts/qualify-snap.sh
+      - name: Verify final package metadata and record retained artifact
+        working-directory: snap
+        run: |
+          sha256sum --check evidence/snap-sha256.txt
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import yaml
+
+          metadata = yaml.safe_load(Path('evidence/snap.yaml').read_text())
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          for key, expected in {
+              'name': 'hiddentunes', 'version': '1.0.1',
+              'architectures': ['amd64'], 'base': 'core24',
+              'grade': 'stable', 'confinement': 'strict', 'license': 'Proprietary',
+          }.items():
+              require(metadata.get(key) == expected, f'Unexpected package {key}')
+          require(set(metadata.get('apps', {})) == {'hiddentunes'}, 'Unexpected application set')
+          app = metadata['apps']['hiddentunes']
+          require(app.get('command') == 'bin/hidden-tunes-launch', 'Unexpected launcher')
+          expected_app_plugs = {
+              'network', 'audio-playback', 'browser-sandbox', 'password-manager-service',
+              'desktop', 'desktop-legacy', 'gsettings', 'opengl', 'wayland', 'x11',
+          }
+          require(set(app.get('plugs', [])) == expected_app_plugs, 'Application interfaces changed')
+          require(app.get('command-chain') == [
+              'snap/command-chain/gpu-2404-wrapper', 'snap/command-chain/desktop-launch',
+          ], 'Extension command chain changed')
+          plugs = metadata.get('plugs', {})
+          require(set(plugs) == {
+              'browser-sandbox', 'desktop', 'gpu-2404', 'gtk-3-themes',
+              'icon-themes', 'sound-themes', 'gnome-46-2404',
+          }, 'Top-level interfaces changed')
+          require(plugs['browser-sandbox'] == {
+              'interface': 'browser-support', 'allow-sandbox': True,
+          }, 'Electron sandbox interface changed')
+          require(plugs['desktop'] == {'mount-host-font-cache': False}, 'Desktop interface changed')
+          for name, target, provider in [
+              ('gpu-2404', '$SNAP/gpu-2404', 'mesa-2404'),
+              ('gtk-3-themes', '$SNAP/data-dir/themes', 'gtk-common-themes'),
+              ('icon-themes', '$SNAP/data-dir/icons', 'gtk-common-themes'),
+              ('sound-themes', '$SNAP/data-dir/sounds', 'gtk-common-themes'),
+              ('gnome-46-2404', '$SNAP/gnome-platform', 'gnome-46-2404'),
+          ]:
+              require(plugs[name] == {
+                  'interface': 'content', 'target': target, 'default-provider': provider,
+              }, f'Extension content interface changed: {name}')
+          artifact = Path('hiddentunes_1.0.1_amd64.snap')
+          with artifact.open('rb') as stream:
+              digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          record = {
+              'status': 'PASS', 'commit': os.environ['GITHUB_SHA'],
+              'artifact': artifact.name, 'sha256': digest, 'bytes': artifact.stat().st_size,
+              'metadata': {key: metadata[key] for key in [
+                  'name', 'version', 'architectures', 'base', 'grade', 'confinement', 'license',
+              ]},
+              'applicationInterfaces': sorted(expected_app_plugs), 'plugs': plugs,
+              'applicationPayloadParity': '75 original files verified by preceding package step',
+              'runtimeTestingThisRun': 'NOT RUN; packaging and metadata only',
+              'priorBoundedStartupRun': '34071790026',
+              'storeApproval': 'NOT IMPLIED by packaging or artifact retention',
+          }
+          Path('evidence/release-artifact.json').write_text(json.dumps(record, indent=2) + '\n')
+          PY
+      - name: Retain qualified Snap upload artifact
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hiddentunes-1.0.1-amd64-snap
+          path: snap/hiddentunes_1.0.1_amd64.snap
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
       - name: Upload text evidence only
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
