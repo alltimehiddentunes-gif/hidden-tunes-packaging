@@ -341,6 +341,13 @@ root = pathlib.Path('/proc')
 forbidden = {'--no-sandbox', '--disable-setuid-sandbox', '--disable-seccomp-filter-sandbox', '--disable-gpu-sandbox', '--single-process'}
 fatal = re.compile(r'No usable sandbox|SUID sandbox|FATAL:|Failed to move to new namespace|error while loading shared libraries|Missing X server|GPU process isn.t usable|The display compositor is frequently crashing', re.I)
 
+def has_cmdline_flag(argv, flag, allow_value=False):
+    # Chromium may expose one space-separated process title instead of its
+    # original NUL-separated argv. Match complete tokens in either form while
+    # retaining the original observed argv list as evidence.
+    boundary = r'(?=$|[\s\0=])' if allow_value else r'(?=$|[\s\0])'
+    return re.search(r'(?:^|[\s\0])' + re.escape(flag) + boundary, '\0'.join(argv)) is not None
+
 def processes():
     found = {}
     unidentified = set()
@@ -361,7 +368,7 @@ def processes():
             matched = True
             exe = os.readlink(path / 'exe')
             argv = (path / 'cmdline').read_bytes().decode(errors='replace').rstrip('\0').split('\0')
-            if any(arg.split('=', 1)[0] in forbidden for arg in argv):
+            if any(has_cmdline_flag(argv, flag, allow_value=True) for flag in forbidden):
                 raise RuntimeError('Sandbox-disabling application flag observed')
             profile = (path / 'attr/current').read_text().strip()
             if profile != 'snap.hiddentunes.hiddentunes (enforce)' or status.get('Seccomp', '').strip() != '2':
@@ -425,7 +432,7 @@ while time.monotonic() < deadline:
             raise RuntimeError('Window PID ownership evidence missing')
         visible.append({'window': parts[0], 'pid': pid, 'title': parts[4][:200] if len(parts) > 4 else '', 'properties': props})
     result.update(lastWindows=visible, lastProcesses=list(procs.values()), unidentifiedTestUidPids=sorted(unidentified))
-    renderers = [p for p in procs.values() if '--type=renderer' in p['argv']]
+    renderers = [p for p in procs.values() if has_cmdline_flag(p['argv'], '--type=renderer')]
     if visible and renderers:
         signature = (tuple(sorted((w['window'], w['pid']) for w in visible)), tuple(sorted(p['pid'] for p in renderers)))
         if first is None or signature != previous_signature:
@@ -477,7 +484,7 @@ for name in application.log openbox.log window-manager.txt session-cgroup.txt x1
 done
 # Capture only this app's exact enforcing-profile denial lines during launch;
 # an unavailable journal is recorded, never presented as absence of denials.
-if sudo journalctl --kernel --since "$startup_since" --no-pager --output=short-precise | awk '/apparmor="DENIED"/ && /profile="snap\.hiddentunes\.hiddentunes"/' > "$evidence/apparmor-app-denials.txt"; then
+if sudo journalctl --dmesg --since "$startup_since" --no-pager --output=short-precise | awk '/apparmor="DENIED"/ && /profile="snap\.hiddentunes\.hiddentunes"/' > "$evidence/apparmor-app-denials.txt"; then
   echo 'Kernel journal query completed; filtered exact application profile' > "$evidence/apparmor-diagnostic-status.txt"
 else
   echo 'Kernel journal diagnostic unavailable or incomplete' > "$evidence/apparmor-diagnostic-status.txt"
