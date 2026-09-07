@@ -176,7 +176,7 @@ done
 [[ $bus_ready == yes ]] || { echo 'Fixture user manager readiness failed'; exit 1; }
 # User-activated Flatpak helpers must resolve the same isolated installation.
 # This affects only this new disposable manager, whose lifetime ends in cleanup.
-as_test systemctl --user set-environment FLATPAK_SYSTEM_DIR="$system_dir"
+as_test systemctl --user set-environment FLATPAK_SYSTEM_DIR="$system_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" XDG_RUNTIME_DIR="$runtime_dir"
 systemctl show "user@$test_uid.service" --property=ActiveState --property=MainPID --property=ControlGroup > "$evidence/user-manager.txt"
 stage=offline_startup
 startup_status=RUNNING
