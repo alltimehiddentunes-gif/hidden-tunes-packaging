@@ -1,0 +1,41 @@
+name: Qualify Flatpak offline startup
+on:
+  push:
+    branches: [qualification-1.0.1]
+    paths:
+      - '.github/workflows/qualify-flatpak-startup.yml'
+      - '.github/workflows/scripts/flatpak-startup/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: flatpak-startup-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  startup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check out the already qualified packaging recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 34cb5cbb5b49f44f4f140b2a3b81f90410797007
+          path: qualified-input
+          persist-credentials: false
+      - name: Observe a disposable offline Flatpak startup
+        env:
+          HT_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash .github/workflows/scripts/flatpak-startup/flatpak-startup.sh
+      - name: Upload text evidence only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: flatpak-startup-evidence
+          path: flatpak-startup-evidence/
+          if-no-files-found: warn
