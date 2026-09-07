@@ -348,6 +348,10 @@ def has_cmdline_flag(argv, flag, allow_value=False):
     boundary = r'(?=$|[\s\0=])' if allow_value else r'(?=$|[\s\0])'
     return re.search(r'(?:^|[\s\0])' + re.escape(flag) + boundary, '\0'.join(argv)) is not None
 
+def initial_client_list_pending(returncode, stdout, stderr, list_seen):
+    expected = 'Cannot get client list properties. (_NET_CLIENT_LIST or _WIN_CLIENT_LIST)'
+    return not list_seen and returncode == 1 and not stdout.strip() and ' '.join(stderr.split()) == expected
+
 def processes():
     found = {}
     unidentified = set()
@@ -396,6 +400,15 @@ def processes():
     return found, unidentified
 
 deadline = time.monotonic() + 65
+client_list_started = deadline - 65
+client_list_seen = False
+client_list_readiness = {'status': 'WAITING', 'deadlineSeconds': 65, 'attempts': []}
+
+def record_client_list_attempt(query, started, status):
+    client_list_readiness.update(status=status, firstSuccessfulListObserved=client_list_seen)
+    client_list_readiness['attempts'].append({'attempt': len(client_list_readiness['attempts']) + 1, 'startedSeconds': round(started - client_list_started, 3), 'returnedSeconds': round(time.monotonic() - client_list_started, 3), 'unixSeconds': time.time(), 'returncode': query.returncode, 'stdout': query.stdout, 'stderr': query.stderr})
+    (evidence / 'x11-client-list-readiness.json').write_text(json.dumps(client_list_readiness, indent=2))
+
 first = None
 observations = []
 previous_signature = None
@@ -405,10 +418,21 @@ while time.monotonic() < deadline:
         result.update(failureClassification='STARTUP_DIAGNOSTIC', reason='Fatal startup/sandbox/loader diagnostic in application.log')
         raise RuntimeError('Fatal startup/sandbox/loader diagnostic; inspect application.log')
     procs, unidentified = processes()
+    query_started = time.monotonic()
     query = x11_query(['wmctrl', '-lp'])
     if query.returncode != 0:
+        pending = initial_client_list_pending(query.returncode, query.stdout, query.stderr, client_list_seen)
+        record_client_list_attempt(query, query_started, 'WAITING' if pending else 'FAIL')
+        if pending:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.5, remaining))
+            continue
         result.update(failureClassification='HARNESS_X11_QUERY_FAILURE', reason=query.stderr)
         raise SystemExit(1)
+    if not client_list_seen:
+        client_list_seen = True
+        record_client_list_attempt(query, query_started, 'READY')
     windows = query.stdout
     visible = []
     for line in windows.splitlines():
@@ -449,6 +473,11 @@ while time.monotonic() < deadline:
         previous_signature = None
     time.sleep(2)
 else:
+    if not client_list_seen:
+        client_list_readiness.update(status='TIMEOUT', elapsedSeconds=round(time.monotonic() - client_list_started, 3))
+        (evidence / 'x11-client-list-readiness.json').write_text(json.dumps(client_list_readiness, indent=2))
+        result.update(status='FAIL', failureClassification='HARNESS_X11_CLIENT_LIST_NOT_READY', reason='Initial X11 client-list properties never became available within the existing 65-second observation deadline')
+        raise SystemExit(1)
     result.update(status='FAIL', failureClassification='STARTUP_NOT_ESTABLISHED', reason='No sustained visible application window with renderer and required process confinement within 65 seconds; inspect retained partial observations')
     raise SystemExit(1)
 PY
