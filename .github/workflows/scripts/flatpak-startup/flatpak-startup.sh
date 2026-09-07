@@ -209,7 +209,7 @@ wait "$client_pid"
 session_rc=$?
 stamp_observation session-client-return "$session_rc"
 sudo env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin GITHUB_ACTIONS=true HT_RUNNER_ENVIRONMENT="$HT_RUNNER_ENVIRONMENT" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
-  timeout --kill-after=5s 10s python3 "$scripts/collect-startup.py" "$test_uid" "$location" "$evidence" final-diagnostics
+  timeout --kill-after=5s 20s python3 "$scripts/collect-startup.py" "$test_uid" "$location" "$evidence" final-diagnostics
 diagnostics_rc=$?
 stamp_observation optional-final-diagnostics-return "$diagnostics_rc"
 set -e

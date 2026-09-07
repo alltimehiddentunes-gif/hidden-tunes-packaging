@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -135,10 +137,135 @@ def log_diagnostics():
     except FileNotFoundError:
         pass
 
+FLATPAK_UNITS = ('flatpak-portal.service', 'flatpak-session-helper.service')
+UNIT_FIELDS = ('Id', 'LoadState', 'ActiveState', 'SubState', 'Result', 'MainPID', 'ExecMainPID', 'ExecMainCode', 'ExecMainStatus', 'ExecMainStartTimestampMonotonic', 'ExecMainExitTimestampMonotonic', 'StateChangeTimestampMonotonic', 'BusName', 'FragmentPath')
+JOURNAL_FIELDS = ('__REALTIME_TIMESTAMP', '__MONOTONIC_TIMESTAMP', '_UID', '_SYSTEMD_OWNER_UID', '_PID', '_COMM', '_SYSTEMD_USER_UNIT', 'USER_UNIT', 'PRIORITY', 'MESSAGE')
+ACTIVATION_NAMES = r'(?<![A-Za-z0-9_.-])(?:org\.freedesktop\.portal\.Flatpak|org\.freedesktop\.Flatpak|flatpak-portal\.service|flatpak-session-helper\.service)(?![A-Za-z0-9_.-])'
+
+def bounded_diagnostic_read(args, stdout_limit):
+    # A new process group contains only this read-only diagnostic command.
+    # Drain bounded pipes; never communicate() into an unbounded buffer.
+    buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+    limits = {'stdout': stdout_limit, 'stderr': 2048}
+    reason = ''
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    deadline = time.monotonic() + 2
+    with selectors.DefaultSelector() as selector:
+        selector.register(proc.stdout, selectors.EVENT_READ, 'stdout')
+        selector.register(proc.stderr, selectors.EVENT_READ, 'stderr')
+        try:
+            while selector.get_map() and not reason:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    reason = 'TIMEOUT'
+                    break
+                for key, _ in selector.select(min(remaining, 0.1)):
+                    name = key.data
+                    room = limits[name] - len(buffers[name])
+                    chunk = os.read(key.fd, min(4096, room + 1))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    buffers[name].extend(chunk[:room])
+                    if len(chunk) > room:
+                        reason = 'OUTPUT_LIMIT'
+                        break
+            if not reason:
+                try:
+                    proc.wait(timeout=max(0.001, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    reason = 'TIMEOUT'
+        finally:
+            if reason or proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            proc.stdout.close()
+            proc.stderr.close()
+            proc.wait(timeout=0.5)
+    return {'returncode': proc.returncode, 'limit': reason, **{key: bytes(value).decode(errors='replace') for key, value in buffers.items()}}
+
+def save_optional(name, value):
+    # Supplemental diagnostic failures cannot alter the required app gate.
+    try:
+        raw = json.dumps(value, ensure_ascii=True, indent=2).encode() + b'\n'
+        if len(raw) > 131072:
+            raw = b'{"status":"OUTPUT_LIMIT","limit":"Optional diagnostic serialization exceeded 128 KiB; records omitted"}\n'
+        (output / name).write_bytes(raw)
+    except OSError:
+        pass
+
+def service_snapshot(phase):
+    result = {**timestamp(), 'phase': phase, 'claim': 'Read-only unit state; inactive does not prove activation failed'}
+    try:
+        query = bounded_diagnostic_read(['runuser', '-u', USER, '--', 'env', '-i', *user_env, 'systemctl', '--user', '--no-pager', 'show', *FLATPAK_UNITS, '--property=' + ','.join(UNIT_FIELDS)], 16384)
+        records = []
+        for block in query['stdout'].strip().split('\n\n')[:2]:
+            values = dict(line.split('=', 1) for line in block.splitlines() if '=' in line)
+            if values.get('Id') in FLATPAK_UNITS:
+                records.append({key: value[:2048] for key, value in values.items() if key in UNIT_FIELDS})
+        result.update(status='RECORDED' if query['returncode'] == 0 and not query['limit'] and {record['Id'] for record in records} == set(FLATPAK_UNITS) else 'INCOMPLETE', records=records, returncode=query['returncode'], limit=query['limit'], stderr=query['stderr'][:512])
+    except Exception as error:
+        result.update(status='UNAVAILABLE', reason=str(error)[:512])
+    save_optional(f'flatpak-service-state-{phase}.json', result)
+
+def journal_record_allowed(record, kind, fresh_uid, start_us, end_us):
+    # Owner UID, when present, takes precedence: never accept another user's
+    # cgroup merely because an emitter happens to run as the requested UID.
+    owner = record.get('_SYSTEMD_OWNER_UID', record.get('_UID'))
+    if str(owner) != str(fresh_uid):
+        return False
+    try:
+        if not start_us <= int(record.get('__REALTIME_TIMESTAMP', '')) <= end_us:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if kind == 'units':
+        return record.get('_SYSTEMD_USER_UNIT') in FLATPAK_UNITS or record.get('USER_UNIT') in FLATPAK_UNITS
+    if kind == 'dbus':
+        return (record.get('_SYSTEMD_USER_UNIT') == 'dbus.service' or record.get('_COMM') == 'dbus-daemon') and isinstance(record.get('MESSAGE'), str) and re.search(ACTIVATION_NAMES, record['MESSAGE']) is not None
+    return False
+
+def service_journals(events):
+    result = {'claim': 'Only exact fresh-UID Flatpak units and exact-name D-Bus activation messages; absence is not success', 'queries': {}}
+    try:
+        start = next(event['unixSeconds'] for event in events if event['event'] == 'session-launch-requested')
+        end = next(event['unixSeconds'] for event in events if event['event'] == 'session-client-return')
+        base = ['journalctl', '--boot', '--no-pager', '--quiet', f'--since=@{int(start)}', f'--until=@{int(end) + 1}', '--output=json', '--output-fields=' + ','.join(JOURNAL_FIELDS)]
+        for kind, count, cap in (('units', 40, 65536), ('dbus', 20, 32768)):
+            if kind == 'units':
+                branches = [[f'{identity}={uid}', f'{field}={unit}'] for identity in ('_UID', '_SYSTEMD_OWNER_UID') for field in ('_SYSTEMD_USER_UNIT', 'USER_UNIT') for unit in FLATPAK_UNITS]
+            else:
+                branches = [[f'{identity}={uid}', match] for identity in ('_UID', '_SYSTEMD_OWNER_UID') for match in ('_SYSTEMD_USER_UNIT=dbus.service', '_COMM=dbus-daemon')]
+            matches = []
+            for branch in branches:
+                if matches:
+                    matches.append('+')
+                matches.extend(branch)
+            args = [*base, f'--lines={count}', *matches]
+            if kind == 'dbus':
+                args.extend(['--case-sensitive=yes', '--grep=' + ACTIVATION_NAMES])
+            query = bounded_diagnostic_read(args, cap)
+            records, malformed = [], 0
+            for line in query['stdout'].splitlines()[:count]:
+                try:
+                    record = json.loads(line)
+                    if isinstance(record, dict) and journal_record_allowed(record, kind, uid, int(start * 1000000), int(end * 1000000)):
+                        records.append({key: value[:2048] for key, value in record.items() if key in JOURNAL_FIELDS and isinstance(value, str)})
+                except ValueError:
+                    malformed += 1
+            result['queries'][kind] = {'status': 'RECORDED' if query['returncode'] == 0 and not query['limit'] and not malformed else 'INCOMPLETE', 'returncode': query['returncode'], 'limit': query['limit'], 'malformedLines': malformed, 'records': records, 'stderr': query['stderr'][:512], 'recordLimit': count}
+    except Exception as error:
+        result.update(status='UNAVAILABLE', reason=str(error)[:512])
+    save_optional('flatpak-service-journal.json', result)
+
 def final_diagnostics():
     # Existing metadata only. Never enable/change crash handling or read cores.
     log_diagnostics()
+    service_snapshot('after-session')
     events = [json.loads(line) for line in (output / 'observation-timeline.jsonl').read_text().splitlines()]
+    service_journals(events)
     start = next(event['unixSeconds'] for event in events if event['event'] == 'session-launch-requested')
     allowed = {'__REALTIME_TIMESTAMP', '__MONOTONIC_TIMESTAMP', 'COREDUMP_UID', 'COREDUMP_PID', 'COREDUMP_COMM', 'COREDUMP_EXE', 'COREDUMP_SIGNAL', 'COREDUMP_SIGNAL_NAME'}
     try:
@@ -318,6 +445,7 @@ if mode == 'final-diagnostics':
     final_diagnostics()
     sys.exit(0)
 
+service_snapshot('before-observer')
 timeline('observer-start', samplingLimit='Process diagnostics sampled between checks; transient processes may be missed')
 try:
     result = observe()
